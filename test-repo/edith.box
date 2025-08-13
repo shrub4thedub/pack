@@ -1,0 +1,72 @@
+[data -c pkg]
+  name edith
+  desc "a text editing interface"
+  os linux freebsd
+  ver 0.1
+
+[fn fetch]
+  set repo "github.com/shrub4thedub/edith"
+  set url "https://${repo}.git"
+  
+  mktemp
+  set tmpdir ${_mktemp_result}
+  set srcdir ${tmpdir}/edith
+  
+  echo "Fetching ${repo}..."
+  run git clone ${url} ${srcdir}
+  
+  cd ${srcdir}
+end
+
+[fn build]
+  echo "Building edith..."
+  run gcc -Wall -Wextra -std=c99 -o edith main.c -lX11 -lutil
+end
+
+[fn install]
+  echo "Installing edith..."
+  env HOME
+  set home ${_env_result}
+  set bindir "${home}/.local/bin"
+  set target "${bindir}/edith"
+  mkdir ${bindir}
+  
+  if exists ./edith
+    run cp ./edith ${target}
+    run chmod +x ${target}
+    echo "Installed edith to ${target}"
+  else
+    echo "edith binary not found after build"
+    exit 1
+  end
+end
+
+[fn cleanup]
+  cd /
+  delete ${tmpdir}
+  echo "edith installation complete!"
+end
+
+[fn -i uninstall]
+  echo "Uninstalling edith..."
+  env HOME
+  set home ${_env_result}
+  set edith_path "${home}/.local/bin/edith"
+  
+  if exists ${edith_path}
+    delete ${edith_path}
+    echo "Removed edith from ${edith_path}"
+    echo "edith uninstallation complete!"
+  else
+    echo "edith not found at ${edith_path}"
+    echo "Nothing to uninstall."
+    exit 1
+  end
+end
+
+[main]
+  fetch
+  build
+  install
+  cleanup
+end
