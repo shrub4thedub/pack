@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,14 +11,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
 
 const (
 	defaultRepo = "https://github.com/shrub4thedub/pack-repo"
-	configDir   = ".config/pack"
-	configFile  = "config.box"
+	packDir     = ".pack"
 )
 
 type Config struct {
@@ -24,6 +26,12 @@ type Config struct {
 }
 
 func main() {
+	// Ensure pack directory structure exists
+	if err := ensurePackDirExists(); err != nil {
+		fmt.Printf("failed to create pack directory: %v\n", err)
+		os.Exit(1)
+	}
+
 	var rootCmd = &cobra.Command{
 		Use:   "pack",
 		Short: "a package manager using boxlang",
@@ -125,16 +133,50 @@ func executePackageScript(packageName string, uninstall bool) error {
 	// Download or copy script
 	scriptPath := filepath.Join(tempDir, packageName+".box")
 	
+	var sourceURL string
 	if useLocal {
-		// Use local test repository
-		localScriptPath := filepath.Join("test-repo", packageName+".box")
+		// Use local repository in ~/.pack/local
+		localRepoPath, err := getLocalRepoPath()
+		if err != nil {
+			return fmt.Errorf("failed to get local repo path: %v", err)
+		}
+		localScriptPath := filepath.Join(localRepoPath, packageName+".box")
 		if err := copyFile(localScriptPath, scriptPath); err != nil {
 			return fmt.Errorf("failed to copy local script: %v", err)
 		}
+		sourceURL = "local"
 	} else {
 		// Try to find script in configured sources
+		config, err := loadConfig()
+		if err != nil {
+			return fmt.Errorf("failed to load config: %v", err)
+		}
+		if len(config.Sources) > 0 {
+			sourceURL = config.Sources[0] // Use first source for lock file
+		}
+		
 		if err := downloadFromSources(packageName, scriptPath); err != nil {
 			return fmt.Errorf("failed to download script: %v", err)
+		}
+	}
+
+	// Verify recipe integrity
+	if !uninstall {
+		fmt.Println("Verifying recipe integrity...")
+		if err := verifyRecipeIntegrity(scriptPath); err != nil {
+			fmt.Printf("⚠️  Warning: %v\n", err)
+			fmt.Print("Continue anyway? [y/N]: ")
+			reader := bufio.NewReader(os.Stdin)
+			response, err := reader.ReadString('\n')
+			if err != nil {
+				return fmt.Errorf("failed to read input: %v", err)
+			}
+			response = strings.TrimSpace(strings.ToLower(response))
+			if response != "y" && response != "yes" {
+				return fmt.Errorf("installation cancelled due to verification failure")
+			}
+		} else {
+			fmt.Println("✓ Recipe integrity verified")
 		}
 	}
 
@@ -164,7 +206,37 @@ func executePackageScript(packageName string, uninstall bool) error {
 	execCmd.Stderr = os.Stderr
 	execCmd.Stdin = os.Stdin
 
-	return execCmd.Run()
+	err = execCmd.Run()
+	if err != nil {
+		return err
+	}
+
+	// Create or update lock file after successful installation
+	if !uninstall {
+		fmt.Println("Creating lock file...")
+		
+		// Extract package info from recipe
+		version, recipeSHA256, err := extractPackageInfo(scriptPath)
+		if err != nil {
+			fmt.Printf("Warning: failed to extract package info: %v\n", err)
+			version = "unknown"
+			recipeSHA256 = "unknown"
+		}
+		
+		// Get commit hash from source
+		commit, err := getSourceCommit(sourceURL)
+		if err != nil {
+			commit = "unknown"
+		}
+		
+		if err := createLockFile(packageName, version, sourceURL, commit, recipeSHA256); err != nil {
+			fmt.Printf("Warning: failed to create lock file: %v\n", err)
+		} else {
+			fmt.Println("✓ Lock file created")
+		}
+	}
+
+	return nil
 }
 
 func copyFile(src, dst string) error {
@@ -315,8 +387,12 @@ func showPackageInfo(packageName string) error {
 	scriptPath := filepath.Join(tempDir, packageName+".box")
 	
 	if useLocal {
-		// Use local test repository
-		localScriptPath := filepath.Join("test-repo", packageName+".box")
+		// Use local repository in ~/.pack/local
+		localRepoPath, err := getLocalRepoPath()
+		if err != nil {
+			return fmt.Errorf("failed to get local repo path: %v", err)
+		}
+		localScriptPath := filepath.Join(localRepoPath, packageName+".box")
 		if err := copyFile(localScriptPath, scriptPath); err != nil {
 			return fmt.Errorf("failed to copy local script: %v", err)
 		}
@@ -428,14 +504,57 @@ func parseAndDisplayPackageInfo(scriptPath, packageName string) error {
 	return nil
 }
 
-func getConfigPath() (string, error) {
+func getPackDir() (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
 	
-	configPath := filepath.Join(homeDir, configDir, configFile)
+	packPath := filepath.Join(homeDir, packDir)
+	return packPath, nil
+}
+
+func getConfigPath() (string, error) {
+	packPath, err := getPackDir()
+	if err != nil {
+		return "", err
+	}
+	
+	configPath := filepath.Join(packPath, "config")
 	return configPath, nil
+}
+
+func getLocalRepoPath() (string, error) {
+	packPath, err := getPackDir()
+	if err != nil {
+		return "", err
+	}
+	
+	localPath := filepath.Join(packPath, "local")
+	return localPath, nil
+}
+
+func ensurePackDirExists() error {
+	packPath, err := getPackDir()
+	if err != nil {
+		return err
+	}
+	
+	// Create main pack directory
+	if err := os.MkdirAll(packPath, 0755); err != nil {
+		return err
+	}
+	
+	// Create subdirectories
+	subdirs := []string{"locks", "config", "tmp", "local"}
+	for _, subdir := range subdirs {
+		subdirPath := filepath.Join(packPath, subdir)
+		if err := os.MkdirAll(subdirPath, 0755); err != nil {
+			return err
+		}
+	}
+	
+	return nil
 }
 
 func ensureConfigExists() error {
@@ -444,15 +563,11 @@ func ensureConfigExists() error {
 		return err
 	}
 	
-	// Check if config file exists
-	if _, err := os.Stat(configPath); err == nil {
-		return nil // Config exists
-	}
+	configFile := filepath.Join(configPath, "sources.box")
 	
-	// Create config directory
-	configDirPath := filepath.Dir(configPath)
-	if err := os.MkdirAll(configDirPath, 0755); err != nil {
-		return err
+	// Check if config file exists
+	if _, err := os.Stat(configFile); err == nil {
+		return nil // Config exists
 	}
 	
 	// Create default config
@@ -460,7 +575,7 @@ func ensureConfigExists() error {
   repo ` + defaultRepo + `
 end`
 	
-	return os.WriteFile(configPath, []byte(defaultConfig), 0644)
+	return os.WriteFile(configFile, []byte(defaultConfig), 0644)
 }
 
 func loadConfig() (*Config, error) {
@@ -473,7 +588,8 @@ func loadConfig() (*Config, error) {
 		return nil, err
 	}
 	
-	content, err := os.ReadFile(configPath)
+	configFile := filepath.Join(configPath, "sources.box")
+	content, err := os.ReadFile(configFile)
 	if err != nil {
 		return nil, err
 	}
@@ -520,6 +636,8 @@ func saveConfig(config *Config) error {
 		return err
 	}
 	
+	configFile := filepath.Join(configPath, "sources.box")
+	
 	var content strings.Builder
 	content.WriteString("[data -c sources]\n")
 	
@@ -529,7 +647,7 @@ func saveConfig(config *Config) error {
 	
 	content.WriteString("end\n")
 	
-	return os.WriteFile(configPath, []byte(content.String()), 0644)
+	return os.WriteFile(configFile, []byte(content.String()), 0644)
 }
 
 func addSourceToConfig(sourceURL string) error {
@@ -575,4 +693,202 @@ func downloadFromSources(packageName string, scriptPath string) error {
 	}
 	
 	return fmt.Errorf("package not found in any source: %v", lastErr)
+}
+
+// calculateSHA256 calculates the SHA256 hash of file contents
+func calculateSHA256(content []byte) string {
+	hash := sha256.Sum256(content)
+	return hex.EncodeToString(hash[:])
+}
+
+// extractSHA256FromRecipe parses the sha256 field from a recipe's data block
+func extractSHA256FromRecipe(scriptPath string) (string, error) {
+	content, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read script: %v", err)
+	}
+
+	lines := strings.Split(string(content), "\n")
+	var inDataBlock bool
+	var blockIndent int
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		
+		// Check for data block start
+		if strings.HasPrefix(trimmed, "[data") {
+			inDataBlock = true
+			blockIndent = len(line) - len(strings.TrimLeft(line, " \t"))
+			continue
+		}
+		
+		// Check for block end
+		if inDataBlock && trimmed == "end" {
+			break
+		}
+		
+		// Check for any other block start
+		if inDataBlock && strings.HasPrefix(trimmed, "[") {
+			break
+		}
+		
+		// Parse data block content for sha256 field
+		if inDataBlock && trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			lineIndent := len(line) - len(strings.TrimLeft(line, " \t"))
+			if lineIndent > blockIndent {
+				parts := strings.SplitN(trimmed, " ", 2)
+				if len(parts) >= 2 && parts[0] == "sha256" {
+					return strings.TrimSpace(parts[1]), nil
+				}
+			}
+		}
+	}
+	
+	return "", fmt.Errorf("sha256 field not found in recipe data block")
+}
+
+// verifyRecipeIntegrity verifies the SHA256 hash of a recipe
+func verifyRecipeIntegrity(scriptPath string) error {
+	// Read the file content
+	content, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return fmt.Errorf("failed to read script: %v", err)
+	}
+	
+	// Extract expected hash from recipe
+	expectedHash, err := extractSHA256FromRecipe(scriptPath)
+	if err != nil {
+		return fmt.Errorf("failed to extract expected hash: %v", err)
+	}
+	
+	// Calculate actual hash
+	actualHash := calculateSHA256(content)
+	
+	// Compare hashes
+	if actualHash != expectedHash {
+		return fmt.Errorf("SHA256 verification failed: expected %s, got %s", expectedHash, actualHash)
+	}
+	
+	return nil
+}
+
+// getLockFilePath returns the path to a package's lock file
+func getLockFilePath(packageName string) (string, error) {
+	packPath, err := getPackDir()
+	if err != nil {
+		return "", err
+	}
+	
+	lockPath := filepath.Join(packPath, "locks", packageName+".lock")
+	return lockPath, nil
+}
+
+// createLockFile creates a lock file for an installed package
+func createLockFile(packageName, version, source, commit, recipeSHA256 string) error {
+	lockFilePath, err := getLockFilePath(packageName)
+	if err != nil {
+		return err
+	}
+	
+	// Get installation paths (assuming standard paths for now)
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	installedTo := filepath.Join(homeDir, ".local/bin", packageName)
+	configDir := filepath.Join(homeDir, ".config", packageName)
+	
+	// Create lock file content in box syntax
+	lockContent := fmt.Sprintf(`[data -c lock]
+  package %s
+  version %s
+  source %s
+  commit %s
+  installed_at %s
+  recipe_sha256 %s
+  installed_to %s
+  config_dir %s
+end
+`, packageName, version, source, commit, time.Now().UTC().Format(time.RFC3339), recipeSHA256, installedTo, configDir)
+	
+	return os.WriteFile(lockFilePath, []byte(lockContent), 0644)
+}
+
+// getSourceCommit gets the latest commit hash from a git repository URL
+func getSourceCommit(sourceURL string) (string, error) {
+	// For now, return a placeholder. In a real implementation, this would
+	// use git ls-remote or similar to get the actual commit hash
+	cmd := exec.Command("git", "ls-remote", sourceURL, "HEAD")
+	output, err := cmd.Output()
+	if err != nil {
+		return "unknown", nil // Don't fail if we can't get commit info
+	}
+	
+	// Parse the output to get the commit hash
+	parts := strings.Fields(string(output))
+	if len(parts) > 0 {
+		return parts[0][:8], nil // Return short commit hash
+	}
+	
+	return "unknown", nil
+}
+
+// extractPackageInfo extracts version and SHA256 from a recipe
+func extractPackageInfo(scriptPath string) (version, sha256 string, err error) {
+	content, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read script: %v", err)
+	}
+
+	lines := strings.Split(string(content), "\n")
+	var inDataBlock bool
+	var blockIndent int
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		
+		// Check for data block start
+		if strings.HasPrefix(trimmed, "[data") {
+			inDataBlock = true
+			blockIndent = len(line) - len(strings.TrimLeft(line, " \t"))
+			continue
+		}
+		
+		// Check for block end
+		if inDataBlock && trimmed == "end" {
+			break
+		}
+		
+		// Check for any other block start
+		if inDataBlock && strings.HasPrefix(trimmed, "[") {
+			break
+		}
+		
+		// Parse data block content
+		if inDataBlock && trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			lineIndent := len(line) - len(strings.TrimLeft(line, " \t"))
+			if lineIndent > blockIndent {
+				parts := strings.SplitN(trimmed, " ", 2)
+				if len(parts) >= 2 {
+					key := parts[0]
+					value := strings.TrimSpace(parts[1])
+					switch key {
+					case "ver":
+						version = value
+					case "sha256":
+						sha256 = value
+					}
+				}
+			}
+		}
+	}
+	
+	if version == "" {
+		version = "unknown"
+	}
+	if sha256 == "" {
+		sha256 = "unknown"
+	}
+	
+	return version, sha256, nil
 }
