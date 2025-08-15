@@ -96,7 +96,7 @@ func closePackage(cmd *cobra.Command, args []string) {
 	packageName := args[0]
 	fmt.Printf("closing package: %s\n", packageName)
 	
-	if err := executePackageScript(packageName, true); err != nil {
+	if err := executeUninstallScript(packageName); err != nil {
 		fmt.Printf("error closing package %s: %v\n", packageName, err)
 		os.Exit(1)
 	}
@@ -123,6 +123,10 @@ func addSource(cmd *cobra.Command, args []string) {
 }
 
 func executePackageScript(packageName string, uninstall bool) error {
+	// Uninstall is now handled by executeUninstallScript
+	if uninstall {
+		return executeUninstallScript(packageName)
+	}
 	// Create temporary directory for script
 	tempDir, err := os.MkdirTemp("", "pack-"+packageName)
 	if err != nil {
@@ -161,30 +165,26 @@ func executePackageScript(packageName string, uninstall bool) error {
 	}
 
 	// Verify recipe integrity
-	if !uninstall {
-		fmt.Println("Verifying recipe integrity...")
-		if err := verifyRecipeIntegrity(scriptPath); err != nil {
-			fmt.Printf("⚠️  Warning: %v\n", err)
-			fmt.Print("Continue anyway? [y/N]: ")
-			reader := bufio.NewReader(os.Stdin)
-			response, err := reader.ReadString('\n')
-			if err != nil {
-				return fmt.Errorf("failed to read input: %v", err)
-			}
-			response = strings.TrimSpace(strings.ToLower(response))
-			if response != "y" && response != "yes" {
-				return fmt.Errorf("installation cancelled due to verification failure")
-			}
-		} else {
-			fmt.Println("✓ Recipe integrity verified")
+	fmt.Println("Verifying recipe integrity...")
+	if err := verifyRecipeIntegrity(scriptPath); err != nil {
+		fmt.Printf("⚠️  Warning: %v\n", err)
+		fmt.Print("Continue anyway? [y/N]: ")
+		reader := bufio.NewReader(os.Stdin)
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("failed to read input: %v", err)
 		}
+		response = strings.TrimSpace(strings.ToLower(response))
+		if response != "y" && response != "yes" {
+			return fmt.Errorf("installation cancelled due to verification failure")
+		}
+	} else {
+		fmt.Println("✓ Recipe integrity verified")
 	}
 
 	// Show recipe and get user confirmation
-	if !uninstall {
-		if err := showRecipeAndConfirm(scriptPath); err != nil {
-			return err
-		}
+	if err := showRecipeAndConfirm(scriptPath); err != nil {
+		return err
 	}
 
 	// Find box executable
@@ -194,12 +194,7 @@ func executePackageScript(packageName string, uninstall bool) error {
 	}
 
 	// Execute script
-	var cmdArgs []string
-	if uninstall {
-		cmdArgs = []string{scriptPath, "uninstall"}
-	} else {
-		cmdArgs = []string{scriptPath}
-	}
+	cmdArgs := []string{scriptPath}
 
 	execCmd := exec.Command(boxPath, cmdArgs...)
 	execCmd.Stdout = os.Stdout
@@ -212,28 +207,36 @@ func executePackageScript(packageName string, uninstall bool) error {
 	}
 
 	// Create or update lock file after successful installation
-	if !uninstall {
-		fmt.Println("Creating lock file...")
-		
-		// Extract package info from recipe
-		version, recipeSHA256, err := extractPackageInfo(scriptPath)
-		if err != nil {
-			fmt.Printf("Warning: failed to extract package info: %v\n", err)
-			version = "unknown"
-			recipeSHA256 = "unknown"
-		}
-		
-		// Get commit hash from source
-		commit, err := getSourceCommit(sourceURL)
-		if err != nil {
-			commit = "unknown"
-		}
-		
-		if err := createLockFile(packageName, version, sourceURL, commit, recipeSHA256); err != nil {
-			fmt.Printf("Warning: failed to create lock file: %v\n", err)
-		} else {
-			fmt.Println("✓ Lock file created")
-		}
+	fmt.Println("Creating lock file...")
+	
+	// Extract package info from recipe
+	version, _, err := extractPackageInfo(scriptPath)
+	if err != nil {
+		fmt.Printf("Warning: failed to extract package info: %v\n", err)
+		version = "unknown"
+	}
+	
+	// Calculate actual SHA256 for lock file
+	content, err := os.ReadFile(scriptPath)
+	if err != nil {
+		fmt.Printf("Warning: failed to read script for hash: %v\n", err)
+	}
+	contentWithoutSHA256, err := removeCSHA256Field(content)
+	if err != nil {
+		fmt.Printf("Warning: failed to remove SHA256 field: %v\n", err)
+	}
+	recipeSHA256 := calculateSHA256(contentWithoutSHA256)
+	
+	// Get commit hash from source
+	commit, err := getSourceCommit(sourceURL)
+	if err != nil {
+		commit = "unknown"
+	}
+	
+	if err := createLockFile(packageName, version, sourceURL, commit, recipeSHA256); err != nil {
+		fmt.Printf("Warning: failed to create lock file: %v\n", err)
+	} else {
+		fmt.Println("✓ Lock file created")
 	}
 
 	return nil
@@ -761,8 +764,12 @@ func verifyRecipeIntegrity(scriptPath string) error {
 		return fmt.Errorf("failed to extract expected hash: %v", err)
 	}
 	
-	// Calculate actual hash
-	actualHash := calculateSHA256(content)
+	// Calculate actual hash excluding the SHA256 field
+	contentWithoutSHA256, err := removeCSHA256Field(content)
+	if err != nil {
+		return fmt.Errorf("failed to remove SHA256 field: %v", err)
+	}
+	actualHash := calculateSHA256(contentWithoutSHA256)
 	
 	// Compare hashes
 	if actualHash != expectedHash {
@@ -805,7 +812,7 @@ func createLockFile(packageName, version, source, commit, recipeSHA256 string) e
   source %s
   commit %s
   installed_at %s
-  recipe_sha256 %s
+  sha256 %s
   installed_to %s
   config_dir %s
 end
@@ -891,4 +898,97 @@ func extractPackageInfo(scriptPath string) (version, sha256 string, err error) {
 	}
 	
 	return version, sha256, nil
+}
+
+// removeCSHA256Field removes the sha256 field from file content for hash calculation
+func removeCSHA256Field(content []byte) ([]byte, error) {
+	lines := strings.Split(string(content), "\n")
+	var filteredLines []string
+
+	for _, line := range lines {
+		// Simple approach: skip any line that contains "sha256" as the first field after whitespace
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && strings.HasPrefix(trimmed, "sha256 ") {
+			// Skip this line
+			continue
+		}
+		// Add all other lines
+		filteredLines = append(filteredLines, line)
+	}
+	
+	return []byte(strings.Join(filteredLines, "\n")), nil
+}
+
+// executeUninstallScript runs the universal uninstaller with the package's lock file
+func executeUninstallScript(packageName string) error {
+	// Check if lock file exists
+	lockFilePath, err := getLockFilePath(packageName)
+	if err != nil {
+		return fmt.Errorf("failed to get lock file path: %v", err)
+	}
+	
+	if _, err := os.Stat(lockFilePath); os.IsNotExist(err) {
+		return fmt.Errorf("package %s is not installed (no lock file found)", packageName)
+	}
+	
+	// Create temporary directory for uninstall script
+	tempDir, err := os.MkdirTemp("", "pack-uninstall-"+packageName)
+	if err != nil {
+		return fmt.Errorf("failed to create temp directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+	
+	// Copy lock file to temp directory as package.lock
+	packageLockPath := filepath.Join(tempDir, "package.lock")
+	if err := copyFile(lockFilePath, packageLockPath); err != nil {
+		return fmt.Errorf("failed to copy lock file: %v", err)
+	}
+	
+	// Download or copy uninstall script
+	uninstallScriptPath := filepath.Join(tempDir, "uninstall.box")
+	
+	if useLocal {
+		// Use local uninstall script
+		localRepoPath, err := getLocalRepoPath()
+		if err != nil {
+			return fmt.Errorf("failed to get local repo path: %v", err)
+		}
+		localUninstallPath := filepath.Join(localRepoPath, "uninstall.box")
+		if err := copyFile(localUninstallPath, uninstallScriptPath); err != nil {
+			return fmt.Errorf("failed to copy local uninstall script: %v", err)
+		}
+	} else {
+		// Download uninstall script from sources
+		if err := downloadFromSources("uninstall", uninstallScriptPath); err != nil {
+			return fmt.Errorf("failed to download uninstall script: %v", err)
+		}
+	}
+	
+	// Find box executable
+	boxPath, err := findBoxExecutable()
+	if err != nil {
+		return fmt.Errorf("box executable not found: %v", err)
+	}
+	
+	// Execute uninstall script
+	execCmd := exec.Command(boxPath, uninstallScriptPath)
+	execCmd.Stdout = os.Stdout
+	execCmd.Stderr = os.Stderr
+	execCmd.Stdin = os.Stdin
+	execCmd.Dir = tempDir // Set working directory so import can find package.lock
+	
+	err = execCmd.Run()
+	if err != nil {
+		return err
+	}
+	
+	// Remove lock file after successful uninstall
+	fmt.Println("Removing lock file...")
+	if err := os.Remove(lockFilePath); err != nil {
+		fmt.Printf("Warning: failed to remove lock file: %v\n", err)
+	} else {
+		fmt.Println("✓ Lock file removed")
+	}
+	
+	return nil
 }
