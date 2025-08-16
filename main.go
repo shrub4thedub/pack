@@ -36,49 +36,60 @@ func main() {
 	var rootCmd = &cobra.Command{
 		Use:   "pack",
 		Short: "a package manager using boxlang",
-		Long:  `pack fetches and executes boxlang installation scripts from a repository.`,
+		Long:  `pack fetches and executes boxlang installation recipes from a repository.`,
 	}
+	rootCmd.SetHelpCommand(&cobra.Command{
+		Use:    "no-help",
+		Hidden: true,
+	})
 
 	var openCmd = &cobra.Command{
-		Use:   "open [package]",
+		Use:   "open [package|help]",
 		Short: "install a package",
 		Args:  cobra.ExactArgs(1),
 		Run:   openPackage,
 	}
 
 	var closeCmd = &cobra.Command{
-		Use:   "close [package]",
+		Use:   "close [package|help]",
 		Short: "uninstall a package",
 		Args:  cobra.ExactArgs(1),
 		Run:   closePackage,
 	}
 
 	var peekCmd = &cobra.Command{
-		Use:   "peek [package]",
+		Use:   "peek [package|help]",
 		Short: "show package information",
 		Args:  cobra.ExactArgs(1),
 		Run:   peekPackage,
 	}
 
 	var addSourceCmd = &cobra.Command{
-		Use:   "add-source [url]",
+		Use:   "add-source [url|help]",
 		Short: "add a repository source",
 		Args:  cobra.ExactArgs(1),
 		Run:   addSource,
 	}
 
 	var listCmd = &cobra.Command{
-		Use:   "list",
+		Use:   "list [help]",
 		Short: "list installed packages",
-		Args:  cobra.NoArgs,
+		Args:  cobra.MaximumNArgs(1),
 		Run:   listPackages,
 	}
 
 	var updateCmd = &cobra.Command{
-		Use:   "update",
+		Use:   "update [help]",
 		Short: "check for and install package updates",
-		Args:  cobra.NoArgs,
+		Args:  cobra.MaximumNArgs(1),
 		Run:   updatePackages,
+	}
+
+	var helpCmd = &cobra.Command{
+		Use:   "help",
+		Short: "show help information",
+		Args:  cobra.NoArgs,
+		Run:   showHelp,
 	}
 
 	rootCmd.AddCommand(openCmd)
@@ -87,6 +98,7 @@ func main() {
 	rootCmd.AddCommand(addSourceCmd)
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(updateCmd)
+	rootCmd.AddCommand(helpCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
@@ -96,6 +108,11 @@ func main() {
 
 
 func openPackage(cmd *cobra.Command, args []string) {
+	if args[0] == "help" {
+		showOpenHelp()
+		return
+	}
+	
 	packageName := args[0]
 	fmt.Printf("opening package: %s\n", packageName)
 	
@@ -106,6 +123,11 @@ func openPackage(cmd *cobra.Command, args []string) {
 }
 
 func closePackage(cmd *cobra.Command, args []string) {
+	if args[0] == "help" {
+		showCloseHelp()
+		return
+	}
+	
 	packageName := args[0]
 	fmt.Printf("closing package: %s\n", packageName)
 	
@@ -116,6 +138,11 @@ func closePackage(cmd *cobra.Command, args []string) {
 }
 
 func peekPackage(cmd *cobra.Command, args []string) {
+	if args[0] == "help" {
+		showPeekHelp()
+		return
+	}
+	
 	packageName := args[0]
 	
 	if err := showPackageInfo(packageName); err != nil {
@@ -125,6 +152,11 @@ func peekPackage(cmd *cobra.Command, args []string) {
 }
 
 func addSource(cmd *cobra.Command, args []string) {
+	if args[0] == "help" {
+		showAddSourceHelp()
+		return
+	}
+	
 	sourceURL := args[0]
 	
 	if err := addSourceToConfig(sourceURL); err != nil {
@@ -158,10 +190,10 @@ func executePackageScript(packageName string, uninstall bool) error {
 	// Note: selectedSource.Name used to be stored as sourceURL, now using repoName instead
 
 	// Verify recipe integrity
-	fmt.Println("Verifying recipe integrity...")
+	fmt.Println("verifying recipe integrity...")
 	if err := verifyRecipeIntegrity(scriptPath); err != nil {
-		fmt.Printf("⚠️  Warning: %v\n", err)
-		fmt.Print("Continue anyway? [y/N]: ")
+		fmt.Printf("⚠️  warning: %v\n", err)
+		fmt.Print("continue anyway? [y/N]: ")
 		reader := bufio.NewReader(os.Stdin)
 		response, err := reader.ReadString('\n')
 		if err != nil {
@@ -172,7 +204,7 @@ func executePackageScript(packageName string, uninstall bool) error {
 			return fmt.Errorf("installation cancelled due to verification failure")
 		}
 	} else {
-		fmt.Println("✓ Recipe integrity verified")
+		fmt.Println("✓ recipe integrity verified")
 	}
 
 	// Show recipe and get user confirmation
@@ -200,19 +232,19 @@ func executePackageScript(packageName string, uninstall bool) error {
 	}
 
 	// Create or update lock file after successful installation
-	fmt.Println("Creating lock file...")
+	fmt.Println("creating lock file...")
 	
 	// Extract source URL from recipe
 	recipeSourceURL, err := extractRecipeURL(scriptPath)
 	if err != nil {
-		fmt.Printf("Warning: failed to extract source URL: %v\n", err)
+		fmt.Printf("warning: failed to extract source URL: %v\n", err)
 		recipeSourceURL = "unknown"
 	}
 	
 	// Detect source type and get version information
 	sourceType, sourceVersion, err := detectSourceTypeAndVersion(recipeSourceURL)
 	if err != nil {
-		fmt.Printf("Warning: failed to detect source type: %v\n", err)
+		fmt.Printf("warning: failed to detect source type: %v\n", err)
 		sourceType = "unknown"
 		sourceVersion = "unknown"
 	}
@@ -220,7 +252,7 @@ func executePackageScript(packageName string, uninstall bool) error {
 	// Calculate recipe version (content hash)
 	recipeVersion, err := calculateRecipeVersion(scriptPath)
 	if err != nil {
-		fmt.Printf("Warning: failed to calculate recipe version: %v\n", err)
+		fmt.Printf("warning: failed to calculate recipe version: %v\n", err)
 		recipeVersion = "unknown"
 	}
 	
@@ -230,11 +262,11 @@ func executePackageScript(packageName string, uninstall bool) error {
 	// Calculate actual SHA256 for lock file
 	content, err := os.ReadFile(scriptPath)
 	if err != nil {
-		fmt.Printf("Warning: failed to read script for hash: %v\n", err)
+		fmt.Printf("warning: failed to read script for hash: %v\n", err)
 	}
 	contentWithoutSHA256, err := removeCSHA256Field(content)
 	if err != nil {
-		fmt.Printf("Warning: failed to remove SHA256 field: %v\n", err)
+		fmt.Printf("warning: failed to remove SHA256 field: %v\n", err)
 	}
 	recipeSHA256 := calculateSHA256(contentWithoutSHA256)
 	
@@ -242,9 +274,9 @@ func executePackageScript(packageName string, uninstall bool) error {
 	repoName := selectedSource.Name
 	
 	if err := createLockFile(packageName, repoName, recipeSourceURL, sourceType, sourceVersion, recipeVersion, recipeURL, recipeSHA256); err != nil {
-		fmt.Printf("Warning: failed to create lock file: %v\n", err)
+		fmt.Printf("warning: failed to create lock file: %v\n", err)
 	} else {
-		fmt.Println("✓ Lock file created")
+		fmt.Println("✓ lockfile created")
 	}
 
 	return nil
@@ -533,6 +565,16 @@ func getLocalRepoPath() (string, error) {
 	return localPath, nil
 }
 
+func getStorePath() (string, error) {
+	packPath, err := getPackDir()
+	if err != nil {
+		return "", err
+	}
+	
+	storePath := filepath.Join(packPath, "store")
+	return storePath, nil
+}
+
 func ensurePackDirExists() error {
 	packPath, err := getPackDir()
 	if err != nil {
@@ -545,7 +587,7 @@ func ensurePackDirExists() error {
 	}
 	
 	// Create subdirectories
-	subdirs := []string{"locks", "config", "tmp", "local"}
+	subdirs := []string{"locks", "config", "tmp", "local", "store"}
 	for _, subdir := range subdirs {
 		subdirPath := filepath.Join(packPath, subdir)
 		if err := os.MkdirAll(subdirPath, 0755); err != nil {
@@ -894,12 +936,18 @@ func createLockFile(packageName, repo, sourceURL, sourceType, sourceVersion, rec
 		return err
 	}
 	
-	// Get installation paths (assuming standard paths for now)
+	// Get store and symlink paths
+	storePath, err := getStorePath()
+	if err != nil {
+		return err
+	}
+	packageStorePath := filepath.Join(storePath, packageName)
+	
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}
-	installedTo := filepath.Join(homeDir, ".local/bin", packageName)
+	symlinkPath := filepath.Join(homeDir, ".local/bin", packageName)
 	configDir := filepath.Join(homeDir, ".config", packageName)
 	
 	// Create comprehensive lock file content in box syntax
@@ -912,11 +960,12 @@ func createLockFile(packageName, repo, sourceURL, sourceType, sourceVersion, rec
   recipe_version %s
   recipe_url %s
   installed_at %s
-  installed_to %s
+  store_path %s
+  symlink_path %s
   config_dir %s
   sha256 %s
 end
-`, packageName, repo, sourceURL, sourceType, sourceVersion, recipeVersion, recipeURL, time.Now().UTC().Format(time.RFC3339), installedTo, configDir, recipeSHA256)
+`, packageName, repo, sourceURL, sourceType, sourceVersion, recipeVersion, recipeURL, time.Now().UTC().Format(time.RFC3339), packageStorePath, symlinkPath, configDir, recipeSHA256)
 	
 	return os.WriteFile(lockFilePath, []byte(lockContent), 0644)
 }
@@ -1142,13 +1191,17 @@ func executeUninstallScript(packageName string) error {
 	// Create combined uninstaller script with embedded lock data
 	combinedScript := string(lockContent) + `
 [fn uninstall]
-  echo "Uninstalling ${lock.package}..."
+  echo "uninstalling ${lock.package}..."
   
-  echo "Removing binary at: ${lock.installed_to}"
-  delete ${lock.installed_to}
-  echo "Removed ${lock.package} binary"
+  echo "removing symlink at: ${lock.symlink_path}"
+  delete ${lock.symlink_path}
+  echo "removed ${lock.package} symlink"
   
-  echo "Config directory ${lock.config_dir} will be preserved (remove manually if desired)"
+  echo "removing store directory: ${lock.store_path}"
+  delete ${lock.store_path}
+  echo "removed ${lock.package} store files"
+  
+  echo "config directory ${lock.config_dir} will be preserved (remove manually if desired)"
   echo "${lock.package} uninstallation complete!"
 end
 
@@ -1181,11 +1234,11 @@ end
 	}
 	
 	// Remove lock file after successful uninstall
-	fmt.Println("Removing lock file...")
+	fmt.Println("removing lockfile...")
 	if err := os.Remove(lockFilePath); err != nil {
-		fmt.Printf("Warning: failed to remove lock file: %v\n", err)
+		fmt.Printf("warning: failed to remove lockfile: %v\n", err)
 	} else {
-		fmt.Println("✓ Lock file removed")
+		fmt.Println("✓ lockfile removed")
 	}
 	
 	return nil
@@ -1193,6 +1246,11 @@ end
 
 // listPackages displays all installed packages with their version information
 func listPackages(cmd *cobra.Command, args []string) {
+	if len(args) > 0 && args[0] == "help" {
+		showListHelp()
+		return
+	}
+	
 	packPath, err := getPackDir()
 	if err != nil {
 		fmt.Printf("error getting pack directory: %v\n", err)
@@ -1216,7 +1274,7 @@ func listPackages(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	fmt.Printf("%-15s %-12s %-30s %s\n", "PACKAGE", "VERSION", "SOURCE", "INSTALLED")
+	fmt.Printf("%-15s %-12s %-30s %s\n", "package", "version", "source", "installed")
 	fmt.Printf("%-15s %-12s %-30s %s\n", "-------", "-------", "------", "---------")
 
 	for _, file := range files {
@@ -1254,7 +1312,12 @@ func listPackages(cmd *cobra.Command, args []string) {
 
 // updatePackages scans for updates and installs them with confirmation
 func updatePackages(cmd *cobra.Command, args []string) {
-	fmt.Println("Scanning for package updates...")
+	if len(args) > 0 && args[0] == "help" {
+		showUpdateHelp()
+		return
+	}
+	
+	fmt.Println("scanning for package updates...")
 	
 	availableUpdates, err := scanForUpdates()
 	if err != nil {
@@ -1268,7 +1331,7 @@ func updatePackages(cmd *cobra.Command, args []string) {
 	}
 
 	// Display available updates
-	fmt.Printf("\nAvailable updates:\n")
+	fmt.Printf("\navailable updates:\n")
 	for _, update := range availableUpdates {
 		fmt.Printf("- %s: %s → %s (%s)\n", 
 			update.PackageName, 
@@ -1278,7 +1341,7 @@ func updatePackages(cmd *cobra.Command, args []string) {
 	}
 
 	// Ask for confirmation
-	fmt.Printf("\nUpdate %d package(s)? [y/N]: ", len(availableUpdates))
+	fmt.Printf("\nupdate %d package(s)? [y/N]: ", len(availableUpdates))
 	reader := bufio.NewReader(os.Stdin)
 	response, err := reader.ReadString('\n')
 	if err != nil {
@@ -1293,17 +1356,17 @@ func updatePackages(cmd *cobra.Command, args []string) {
 	}
 
 	// Perform updates
-	fmt.Println("\nUpdating packages...")
+	fmt.Println("\nupdating packages...")
 	for _, update := range availableUpdates {
 		fmt.Printf("Updating %s...\n", update.PackageName)
-		if err := executePackageScript(update.PackageName, false); err != nil {
+		if err := updatePackageFromOriginalSource(update.PackageName); err != nil {
 			fmt.Printf("error updating %s: %v\n", update.PackageName, err)
 		} else {
 			fmt.Printf("✓ %s updated successfully\n", update.PackageName)
 		}
 	}
 	
-	fmt.Println("\nUpdate complete!")
+	fmt.Println("\nupdate complete!")
 }
 
 // PackageUpdate represents an available update
@@ -1346,7 +1409,7 @@ func scanForUpdates() ([]PackageUpdate, error) {
 
 		update, hasUpdate, err := checkPackageForUpdate(packageName, lockData)
 		if err != nil {
-			fmt.Printf("Warning: failed to check updates for %s: %v\n", packageName, err)
+			fmt.Printf("warning: failed to check updates for %s: %v\n", packageName, err)
 			continue
 		}
 
@@ -1465,4 +1528,323 @@ func getCurrentSourceVersion(sourceURL, sourceType string) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown source type: %s", sourceType)
 	}
+}
+
+// updatePackageFromOriginalSource updates a package using the same source it was originally installed from
+func updatePackageFromOriginalSource(packageName string) error {
+	// Read the lock file to get original source info
+	lockFilePath, err := getLockFilePath(packageName)
+	if err != nil {
+		return fmt.Errorf("failed to get lock file path: %v", err)
+	}
+
+	lockData, err := parseLockFile(lockFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to parse lock file: %v", err)
+	}
+
+	originalRepo := lockData["repo"]
+	if originalRepo == "" {
+		return fmt.Errorf("no original repo found in lock file")
+	}
+
+	// Create temporary directory for script
+	tempDir, err := os.MkdirTemp("", "pack-update-"+packageName)
+	if err != nil {
+		return fmt.Errorf("failed to create temp directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Download script from original source
+	scriptPath := filepath.Join(tempDir, packageName+".box")
+	
+	var selectedSource PackageSource
+	if originalRepo == "local" {
+		// Use local source
+		localRepoPath, err := getLocalRepoPath()
+		if err != nil {
+			return fmt.Errorf("failed to get local repo path: %v", err)
+		}
+		localPackagePath := filepath.Join(localRepoPath, packageName+".box")
+		if _, err := os.Stat(localPackagePath); err != nil {
+			return fmt.Errorf("package not found in local repository: %v", err)
+		}
+		
+		selectedSource = PackageSource{
+			Name: "local",
+			URL:  localPackagePath,
+			Type: "local",
+		}
+		
+		if err := copyFile(localPackagePath, scriptPath); err != nil {
+			return fmt.Errorf("failed to copy from local source: %v", err)
+		}
+	} else {
+		// Use remote source
+		scriptURL := fmt.Sprintf("%s/raw/main/%s.box", originalRepo, packageName)
+		
+		selectedSource = PackageSource{
+			Name: originalRepo,
+			URL:  scriptURL,
+			Type: "remote",
+		}
+		
+		if err := downloadFile(scriptURL, scriptPath); err != nil {
+			return fmt.Errorf("failed to download from original source: %v", err)
+		}
+	}
+	
+	fmt.Printf("Using original source: %s\n", selectedSource.Name)
+
+	// Verify recipe integrity
+	fmt.Println("Verifying recipe integrity...")
+	if err := verifyRecipeIntegrity(scriptPath); err != nil {
+		fmt.Printf("⚠️  Warning: %v\n", err)
+		fmt.Print("Continue anyway? [y/N]: ")
+		reader := bufio.NewReader(os.Stdin)
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("failed to read input: %v", err)
+		}
+		response = strings.TrimSpace(strings.ToLower(response))
+		if response != "y" && response != "yes" {
+			return fmt.Errorf("update cancelled due to verification failure")
+		}
+	} else {
+		fmt.Println("✓ recipe integrity verified")
+	}
+
+	// Show recipe and get user confirmation
+	if err := showRecipeAndConfirm(scriptPath); err != nil {
+		return err
+	}
+
+	// Find box executable
+	boxPath, err := findBoxExecutable()
+	if err != nil {
+		return fmt.Errorf("box executable not found: %v", err)
+	}
+
+	// Execute script
+	cmdArgs := []string{scriptPath}
+
+	execCmd := exec.Command(boxPath, cmdArgs...)
+	execCmd.Stdout = os.Stdout
+	execCmd.Stderr = os.Stderr
+	execCmd.Stdin = os.Stdin
+
+	err = execCmd.Run()
+	if err != nil {
+		return err
+	}
+
+	// Create or update lock file after successful installation
+	fmt.Println("updating lockfile...")
+	
+	// Extract source URL from recipe
+	recipeSourceURL, err := extractRecipeURL(scriptPath)
+	if err != nil {
+		fmt.Printf("Warning: failed to extract source URL: %v\n", err)
+		recipeSourceURL = "unknown"
+	}
+	
+	// Detect source type and get version information
+	sourceType, sourceVersion, err := detectSourceTypeAndVersion(recipeSourceURL)
+	if err != nil {
+		fmt.Printf("warning: failed to detect source type: %v\n", err)
+		sourceType = "unknown"
+		sourceVersion = "unknown"
+	}
+	
+	// Calculate recipe version (content hash)
+	recipeVersion, err := calculateRecipeVersion(scriptPath)
+	if err != nil {
+		fmt.Printf("warning: failed to calculate recipe version: %v\n", err)
+		recipeVersion = "unknown"
+	}
+	
+	// Construct recipe URL from selected source
+	recipeURL := constructRecipeURL(selectedSource, packageName)
+	
+	// Calculate actual SHA256 for lock file
+	content, err := os.ReadFile(scriptPath)
+	if err != nil {
+		fmt.Printf("warning: failed to read script for hash: %v\n", err)
+	}
+	contentWithoutSHA256, err := removeCSHA256Field(content)
+	if err != nil {
+		fmt.Printf("warning: failed to remove SHA256 field: %v\n", err)
+	}
+	recipeSHA256 := calculateSHA256(contentWithoutSHA256)
+	
+	// Get repo name from selected source
+	repoName := selectedSource.Name
+	
+	if err := createLockFile(packageName, repoName, recipeSourceURL, sourceType, sourceVersion, recipeVersion, recipeURL, recipeSHA256); err != nil {
+		fmt.Printf("warning: failed to update lock file: %v\n", err)
+	} else {
+		fmt.Println("✓ lockfile updated")
+	}
+
+	return nil
+}
+
+// showHelp displays general help information
+func showHelp(cmd *cobra.Command, args []string) {
+	fmt.Println("pack - a package manager using boxlang")
+	fmt.Println()
+	fmt.Println("USAGE:")
+	fmt.Println("  pack <command> [arguments]")
+	fmt.Println()
+	fmt.Println("COMMANDS:")
+	fmt.Println("  open <package>     install a package")
+	fmt.Println("  close <package>    uninstall a package")
+	fmt.Println("  list               list installed packages")
+	fmt.Println("  update             check for and install package updates")
+	fmt.Println("  peek <package>     show package information")
+	fmt.Println("  add-source <url>   add a repository source")
+	fmt.Println("  help               show this help information")
+	fmt.Println()
+	fmt.Println("For command-specific help, use: pack <command> help")
+	fmt.Println("Example: pack open help")
+}
+
+// showOpenHelp displays help for the open command
+func showOpenHelp() {
+	fmt.Println("pack open - install a package")
+	fmt.Println()
+	fmt.Println("USAGE:")
+	fmt.Println("  pack open <package>")
+	fmt.Println("  pack open help")
+	fmt.Println()
+	fmt.Println("DESCRIPTION:")
+	fmt.Println("  downloads and installs a package from configured sources.")
+	fmt.Println("  if multiple sources have the package, you'll be prompted to choose.")
+	fmt.Println()
+	fmt.Println("  the installation process:")
+	fmt.Println("  1. finds the package in available sources")
+	fmt.Println("  2. downloads and verifies the recipe")
+	fmt.Println("  3. shows the recipe for review")
+	fmt.Println("  4. executes the installation script")
+	fmt.Println("  5. creates a lockfile for tracking")
+	fmt.Println()
+	fmt.Println("EXAMPLES:")
+	fmt.Println("  pack open vim      # Install vim text editor")
+	fmt.Println("  pack open pfetch   # Install pfetch system info tool")
+}
+
+// showCloseHelp displays help for the close command
+func showCloseHelp() {
+	fmt.Println("pack close - uninstall a package")
+	fmt.Println()
+	fmt.Println("USAGE:")
+	fmt.Println("  pack close <package>")
+	fmt.Println("  pack close help")
+	fmt.Println()
+	fmt.Println("DESCRIPTION:")
+	fmt.Println("  uninstalls a previously installed package using the universal")
+	fmt.Println("  uninstaller with information from the package's lock file.")
+	fmt.Println()
+	fmt.Println("  the uninstallation process:")
+	fmt.Println("  1. reads the package lock file")
+	fmt.Println("  2. removes the installed binary")
+	fmt.Println("  3. preserves configuration files")
+	fmt.Println("  4. removes the lockfile")
+	fmt.Println()
+	fmt.Println("EXAMPLES:")
+	fmt.Println("  pack close vim     # Uninstall vim")
+	fmt.Println("  pack close pfetch  # Uninstall pfetch")
+}
+
+// showListHelp displays help for the list command
+func showListHelp() {
+	fmt.Println("pack list - list installed packages")
+	fmt.Println()
+	fmt.Println("USAGE:")
+	fmt.Println("  pack list")
+	fmt.Println("  pack list help")
+	fmt.Println()
+	fmt.Println("DESCRIPTION:")
+	fmt.Println("  shows all installed packages with their version information,")
+	fmt.Println("  source repository, and installation date.")
+	fmt.Println()
+	fmt.Println("  columns displayed:")
+	fmt.Println("  - PACKAGE: Package name")
+	fmt.Println("  - VERSION: Source version (git commit or content hash)")
+	fmt.Println("  - SOURCE: Origin URL of the package")
+	fmt.Println("  - INSTALLED: Installation date")
+	fmt.Println()
+	fmt.Println("EXAMPLE:")
+	fmt.Println("  pack list")
+}
+
+// showUpdateHelp displays help for the update command
+func showUpdateHelp() {
+	fmt.Println("pack update - check for and install package updates")
+	fmt.Println()
+	fmt.Println("USAGE:")
+	fmt.Println("  pack update")
+	fmt.Println("  pack update help")
+	fmt.Println()
+	fmt.Println("DESCRIPTION:")
+	fmt.Println("  scans all installed packages for available updates by comparing")
+	fmt.Println("  current versions with remote sources. Updates use the same")
+	fmt.Println("  source repository that was used for original installation.")
+	fmt.Println()
+	fmt.Println("  the update process:")
+	fmt.Println("  1. checks all packages for updates")
+	fmt.Println("  2. shows available updates")
+	fmt.Println("  3. asks for confirmation")
+	fmt.Println("  4. updates all confirmed packages")
+	fmt.Println()
+	fmt.Println("  update detection:")
+	fmt.Println("  - git packages: compares commit hashes")
+	fmt.Println("  - recipe changes: compares recipe content")
+	fmt.Println()
+	fmt.Println("EXAMPLE:")
+	fmt.Println("  pack update")
+}
+
+// showPeekHelp displays help for the peek command
+func showPeekHelp() {
+	fmt.Println("pack peek - show package information")
+	fmt.Println()
+	fmt.Println("USAGE:")
+	fmt.Println("  pack peek <package>")
+	fmt.Println("  pack peek help")
+	fmt.Println()
+	fmt.Println("DESCRIPTION:")
+	fmt.Println("  downloads and displays information about a package without")
+	fmt.Println("  installing it. shows package metadata from the recipe.")
+	fmt.Println()
+	fmt.Println("  information displayed:")
+	fmt.Println("  - package name and description")
+	fmt.Println("  - version and supported operating systems")
+	fmt.Println("  - source URL and license")
+	fmt.Println("  - author information")
+	fmt.Println()
+	fmt.Println("EXAMPLES:")
+	fmt.Println("  pack peek vim      # Show vim package info")
+	fmt.Println("  pack peek pfetch   # Show pfetch package info")
+}
+
+// showAddSourceHelp displays help for the add-source command
+func showAddSourceHelp() {
+	fmt.Println("pack add-source - add a repository source")
+	fmt.Println()
+	fmt.Println("USAGE:")
+	fmt.Println("  pack add-source <url>")
+	fmt.Println("  pack add-source help")
+	fmt.Println()
+	fmt.Println("DESCRIPTION:")
+	fmt.Println("  adds a new repository source for package discovery.")
+	fmt.Println("  sources are searched when installing packages.")
+	fmt.Println()
+	fmt.Println("  supported source types:")
+	fmt.Println("  - github repositories")
+	fmt.Println("  - other git repositories with web access")
+	fmt.Println()
+	fmt.Println("EXAMPLES:")
+	fmt.Println("  pack add-source https://github.com/user/pack-repo")
+	fmt.Println("  pack add-source https://gitlab.com/user/packages")
 }
