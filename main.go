@@ -1218,29 +1218,9 @@ func verifyRecipeIntegrity(scriptPath string, sourceRepo string) error {
 	return nil
 }
 
-// verifyEd25519Signature verifies a detached Ed25519 signature
+// verifyEd25519Signature verifies a detached Ed25519 signature with fallback chain
 func verifyEd25519Signature(scriptPath string, sourceRepo string) error {
-	// Get public key for source
-	pubkey, err := getPublicKeyForSource(sourceRepo)
-	if err != nil {
-		return fmt.Errorf("no public key configured for source: %v", err)
-	}
-	
-	if pubkey == "" {
-		return fmt.Errorf("empty public key for source %s", sourceRepo)
-	}
-	
-	// Decode base64 public key
-	pubkeyBytes, err := base64.StdEncoding.DecodeString(pubkey)
-	if err != nil {
-		return fmt.Errorf("invalid base64 public key: %v", err)
-	}
-	
-	if len(pubkeyBytes) != ed25519.PublicKeySize {
-		return fmt.Errorf("invalid public key size: expected %d, got %d", ed25519.PublicKeySize, len(pubkeyBytes))
-	}
-	
-	// Download signature file
+	// Download signature file first
 	sigPath := scriptPath + ".sig"
 	sigURL := strings.Replace(getScriptURL(sourceRepo, filepath.Base(scriptPath)), ".box", ".box.sig", 1)
 	
@@ -1256,7 +1236,7 @@ func verifyEd25519Signature(scriptPath string, sourceRepo string) error {
 	}
 	
 	// Decode base64 signature
-	signature, err := base64.StdEncoding.DecodeString(string(sigBytes))
+	signature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(sigBytes)))
 	if err != nil {
 		return fmt.Errorf("invalid base64 signature: %v", err)
 	}
@@ -1267,12 +1247,123 @@ func verifyEd25519Signature(scriptPath string, sourceRepo string) error {
 		return fmt.Errorf("failed to read recipe: %v", err)
 	}
 	
-	// Verify signature
+	// Implement fallback chain verification
+	return verifyWithKeyChain(content, signature, sourceRepo)
+}
+
+// verifyWithKeyChain tries multiple keys in order: current, refreshed, previous versions
+func verifyWithKeyChain(content, signature []byte, sourceRepo string) error {
+	// Step 1: Try current cached key
+	if pubkey, _, err := getCachedPublicKeyWithVersion(sourceRepo); err == nil {
+		if verifySignatureWithKey(content, signature, pubkey) == nil {
+			return nil
+		}
+	}
+	
+	// Step 2: Try to fetch latest key metadata and verify
+	if metadata, err := fetchKeyMetadata(sourceRepo); err == nil {
+		if verifySignatureWithKey(content, signature, metadata.Key) == nil {
+			// Cache the new key
+			cachePublicKeyWithVersion(sourceRepo, metadata)
+			return nil
+		}
+		
+		// Step 3: If new key fails, try with previous versions (if available)
+		if previousKeys, err := fetchPreviousKeyVersions(sourceRepo, metadata.Version); err == nil {
+			for _, prevKey := range previousKeys {
+				if verifySignatureWithKey(content, signature, prevKey) == nil {
+					return nil // Accept previous key during transition
+				}
+			}
+		}
+	}
+	
+	// Step 4: Try legacy .pub format as last resort
+	if legacyKey, err := fetchLegacyPublicKey(sourceRepo); err == nil {
+		if verifySignatureWithKey(content, signature, legacyKey) == nil {
+			return nil
+		}
+	}
+	
+	// Step 5: Clear cache and try once more with fresh fetch
+	clearKeyCache(sourceRepo)
+	if metadata, err := fetchKeyMetadata(sourceRepo); err == nil {
+		if verifySignatureWithKey(content, signature, metadata.Key) == nil {
+			cachePublicKeyWithVersion(sourceRepo, metadata)
+			return nil
+		}
+	}
+	
+	return fmt.Errorf("signature verification failed with all available keys")
+}
+
+// verifySignatureWithKey verifies a signature against a specific public key
+func verifySignatureWithKey(content, signature []byte, pubkeyB64 string) error {
+	pubkeyBytes, err := base64.StdEncoding.DecodeString(pubkeyB64)
+	if err != nil {
+		return fmt.Errorf("invalid base64 public key: %v", err)
+	}
+	
+	if len(pubkeyBytes) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid public key size: expected %d, got %d", ed25519.PublicKeySize, len(pubkeyBytes))
+	}
+	
 	if !ed25519.Verify(pubkeyBytes, content, signature) {
 		return fmt.Errorf("signature verification failed")
 	}
 	
 	return nil
+}
+
+// fetchPreviousKeyVersions attempts to fetch previous key versions for transition support
+func fetchPreviousKeyVersions(sourceRepo string, currentVersion int) ([]string, error) {
+	var previousKeys []string
+	
+	// Try to fetch up to 3 previous versions
+	for i := 1; i <= 3 && currentVersion-i >= 0; i++ {
+		prevVersion := currentVersion - i
+		keyURL := fmt.Sprintf("%s/raw/main/keys/pack_v%d.box", sourceRepo, prevVersion)
+		
+		resp, err := http.Get(keyURL)
+		if err != nil {
+			continue // Skip missing versions
+		}
+		defer resp.Body.Close()
+		
+		if resp.StatusCode != 200 {
+			continue // Version doesn't exist
+		}
+		
+		content, err := io.ReadAll(resp.Body)
+		if err != nil {
+			continue
+		}
+		
+		if metadata, err := parseKeyMetadata(string(content)); err == nil {
+			previousKeys = append(previousKeys, metadata.Key)
+		}
+	}
+	
+	if len(previousKeys) == 0 {
+		return nil, fmt.Errorf("no previous key versions found")
+	}
+	
+	return previousKeys, nil
+}
+
+// clearKeyCache removes cached keys for a source to force refresh
+func clearKeyCache(sourceRepo string) {
+	packPath, err := getPackDir()
+	if err != nil {
+		return
+	}
+	
+	cacheDir := filepath.Join(packPath, "cache", "keys")
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(sourceRepo)))
+	
+	// Remove both .box and .pub cache files
+	os.Remove(filepath.Join(cacheDir, hash+".box"))
+	os.Remove(filepath.Join(cacheDir, hash+".pub"))
 }
 
 // verifySHA256Hash performs legacy SHA256 self-verification
@@ -1364,17 +1455,80 @@ func fetchPublicKeyFromRepo(sourceRepo string) (string, error) {
 		return "", fmt.Errorf("local sources don't have remote keys")
 	}
 	
-	// Try cached key first
-	if cachedKey, err := getCachedPublicKey(sourceRepo); err == nil {
+	// Try cached key first (with version checking)
+	if cachedKey, version, err := getCachedPublicKeyWithVersion(sourceRepo); err == nil {
+		// Check if we need to refresh (for automatic cache invalidation)
+		if shouldRefreshKey(sourceRepo, version) {
+			// Try to fetch new version in background, but use cached for now
+			go backgroundKeyRefresh(sourceRepo)
+		}
 		return cachedKey, nil
 	}
 	
-	// Fetch from repository
+	// Try new .box format first
+	if keyData, err := fetchKeyMetadata(sourceRepo); err == nil {
+		return keyData.Key, nil
+	}
+	
+	// Fallback to legacy .pub format
+	return fetchLegacyPublicKey(sourceRepo)
+}
+
+// KeyMetadata represents the metadata from a pack.box key file
+type KeyMetadata struct {
+	Version   int
+	IssuedAt  int64
+	ExpiresAt int64
+	Algorithm string
+	Key       string
+}
+
+// fetchKeyMetadata fetches key metadata from the new .box format
+func fetchKeyMetadata(sourceRepo string) (*KeyMetadata, error) {
+	keyURL := fmt.Sprintf("%s/raw/main/keys/pack.box", sourceRepo)
+	
+	resp, err := http.Get(keyURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch key metadata: %v", err)
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("key metadata not found at %s (status: %d)", keyURL, resp.StatusCode)
+	}
+	
+	content, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read key metadata: %v", err)
+	}
+	
+	// Parse the .box file using Box parser
+	metadata, err := parseKeyMetadata(string(content))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse key metadata: %v", err)
+	}
+	
+	// Validate key format
+	if len(metadata.Key) != 44 || !strings.HasSuffix(metadata.Key, "=") {
+		return nil, fmt.Errorf("invalid public key format in metadata")
+	}
+	
+	// Cache the key with version info
+	if err := cachePublicKeyWithVersion(sourceRepo, metadata); err != nil {
+		// Don't fail on cache errors, just log them
+		fmt.Printf("Warning: failed to cache public key: %v\n", err)
+	}
+	
+	return metadata, nil
+}
+
+// fetchLegacyPublicKey fetches from the old .pub format (fallback)
+func fetchLegacyPublicKey(sourceRepo string) (string, error) {
 	keyURL := fmt.Sprintf("%s/raw/main/keys/pack.pub", sourceRepo)
 	
 	resp, err := http.Get(keyURL)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch public key: %v", err)
+		return "", fmt.Errorf("failed to fetch legacy public key: %v", err)
 	}
 	defer resp.Body.Close()
 	
@@ -1384,20 +1538,27 @@ func fetchPublicKeyFromRepo(sourceRepo string) (string, error) {
 	
 	keyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read public key: %v", err)
+		return "", fmt.Errorf("failed to read legacy public key: %v", err)
 	}
 	
 	pubkey := strings.TrimSpace(string(keyBytes))
 	
-	// Validate key format (base64 encoded Ed25519 public key should be 44 chars)
+	// Validate key format
 	if len(pubkey) != 44 || !strings.HasSuffix(pubkey, "=") {
-		return "", fmt.Errorf("invalid public key format")
+		return "", fmt.Errorf("invalid legacy public key format")
 	}
 	
-	// Cache the key for future use
-	if err := cachePublicKey(sourceRepo, pubkey); err != nil {
-		// Don't fail on cache errors, just log them
-		fmt.Printf("Warning: failed to cache public key: %v\n", err)
+	// Cache as legacy key (version 0)
+	legacyMetadata := &KeyMetadata{
+		Version:   0,
+		IssuedAt:  time.Now().Unix(),
+		ExpiresAt: time.Now().Add(365 * 24 * time.Hour).Unix(),
+		Algorithm: "ed25519",
+		Key:       pubkey,
+	}
+	
+	if err := cachePublicKeyWithVersion(sourceRepo, legacyMetadata); err != nil {
+		fmt.Printf("Warning: failed to cache legacy public key: %v\n", err)
 	}
 	
 	return pubkey, nil
@@ -1441,6 +1602,283 @@ func cachePublicKey(sourceRepo, pubkey string) error {
 	keyFile := filepath.Join(cacheDir, hash+".pub")
 	
 	return os.WriteFile(keyFile, []byte(pubkey+"\n"), 0644)
+}
+
+// getCachedPublicKeyWithVersion retrieves a cached public key with version info
+func getCachedPublicKeyWithVersion(sourceRepo string) (string, int, error) {
+	packPath, err := getPackDir()
+	if err != nil {
+		return "", 0, err
+	}
+	
+	cacheDir := filepath.Join(packPath, "cache", "keys")
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(sourceRepo)))
+	
+	// Try versioned cache first
+	keyFile := filepath.Join(cacheDir, hash+".box")
+	if content, err := os.ReadFile(keyFile); err == nil {
+		metadata, err := parseKeyMetadata(string(content))
+		if err == nil {
+			return metadata.Key, metadata.Version, nil
+		}
+	}
+	
+	// Fallback to legacy cache
+	legacyFile := filepath.Join(cacheDir, hash+".pub")
+	if content, err := os.ReadFile(legacyFile); err == nil {
+		return strings.TrimSpace(string(content)), 0, nil
+	}
+	
+	return "", 0, fmt.Errorf("no cached key found")
+}
+
+// cachePublicKeyWithVersion stores a public key with version metadata
+func cachePublicKeyWithVersion(sourceRepo string, metadata *KeyMetadata) error {
+	packPath, err := getPackDir()
+	if err != nil {
+		return err
+	}
+	
+	cacheDir := filepath.Join(packPath, "cache", "keys")
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return err
+	}
+	
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(sourceRepo)))
+	keyFile := filepath.Join(cacheDir, hash+".box")
+	
+	// Create .box format cache file
+	cacheContent := fmt.Sprintf(`[data -c keyinfo]
+  version     %d
+  issued_at   %d
+  expires_at  %d
+  algorithm   %s
+  cached_at   %d
+end
+
+[data -c pubkey]
+  key %s
+end`, metadata.Version, metadata.IssuedAt, metadata.ExpiresAt, metadata.Algorithm, time.Now().Unix(), metadata.Key)
+	
+	return os.WriteFile(keyFile, []byte(cacheContent), 0644)
+}
+
+// shouldRefreshKey determines if a cached key should be refreshed
+func shouldRefreshKey(sourceRepo string, version int) bool {
+	packPath, err := getPackDir()
+	if err != nil {
+		return true // Refresh if we can't check
+	}
+	
+	cacheDir := filepath.Join(packPath, "cache", "keys")
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(sourceRepo)))
+	keyFile := filepath.Join(cacheDir, hash+".box")
+	
+	stat, err := os.Stat(keyFile)
+	if err != nil {
+		return true // Refresh if cache file doesn't exist
+	}
+	
+	// Refresh if cache is older than 24 hours
+	return time.Since(stat.ModTime()) > 24*time.Hour
+}
+
+// backgroundKeyRefresh refreshes a key in the background
+func backgroundKeyRefresh(sourceRepo string) {
+	// Try to fetch new metadata
+	if metadata, err := fetchKeyMetadata(sourceRepo); err == nil {
+		// Key was updated, clear old cache and store new
+		cachePublicKeyWithVersion(sourceRepo, metadata)
+	} else {
+		// Fallback to legacy format
+		if key, err := fetchLegacyPublicKey(sourceRepo); err == nil {
+			legacyMetadata := &KeyMetadata{
+				Version:   0,
+				IssuedAt:  time.Now().Unix(),
+				ExpiresAt: time.Now().Add(365 * 24 * time.Hour).Unix(),
+				Algorithm: "ed25519",
+				Key:       key,
+			}
+			cachePublicKeyWithVersion(sourceRepo, legacyMetadata)
+		}
+	}
+}
+
+// parseKeyMetadata parses key metadata from a .box format string using the Box binary
+func parseKeyMetadata(content string) (*KeyMetadata, error) {
+	// Create a temporary file for the Box parser
+	tempFile, err := os.CreateTemp("", "keyparse_*.box")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tempFile.Name())
+	
+	if err := os.WriteFile(tempFile.Name(), []byte(content), 0644); err != nil {
+		return nil, fmt.Errorf("failed to write temp file: %v", err)
+	}
+	
+	// Use the Box binary to execute the script and extract data
+	boxPath := findBoxBinary()
+	if boxPath == "" {
+		// Fallback to simple parsing if Box binary not found
+		return parseKeyMetadataSimple(content)
+	}
+	
+	// Create a wrapper script that extracts the data
+	wrapperContent := fmt.Sprintf(`import %s
+
+[main]
+  # Extract keyinfo data
+  echo "VERSION:" $keyinfo.version
+  echo "ISSUED_AT:" $keyinfo.issued_at  
+  echo "EXPIRES_AT:" $keyinfo.expires_at
+  echo "ALGORITHM:" $keyinfo.algorithm
+  echo "KEY:" $pubkey.key
+end`, tempFile.Name())
+	
+	wrapperFile, err := os.CreateTemp("", "wrapper_*.box")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create wrapper file: %v", err)
+	}
+	defer os.Remove(wrapperFile.Name())
+	
+	if err := os.WriteFile(wrapperFile.Name(), []byte(wrapperContent), 0644); err != nil {
+		return nil, fmt.Errorf("failed to write wrapper file: %v", err)
+	}
+	
+	// Execute the wrapper script
+	cmd := exec.Command(boxPath, wrapperFile.Name())
+	output, err := cmd.Output()
+	if err != nil {
+		// Fallback to simple parsing if Box execution fails
+		return parseKeyMetadataSimple(content)
+	}
+	
+	return parseBoxOutput(string(output))
+}
+
+// findBoxBinary finds the Box binary in the system
+func findBoxBinary() string {
+	// Try relative path first (for development)
+	boxPath := "../boxlang/box"
+	if _, err := os.Stat(boxPath); err == nil {
+		return boxPath
+	}
+	
+	// Try in PATH
+	if path, err := exec.LookPath("box"); err == nil {
+		return path
+	}
+	
+	return ""
+}
+
+// parseBoxOutput parses the output from the Box binary
+func parseBoxOutput(output string) (*KeyMetadata, error) {
+	metadata := &KeyMetadata{
+		Algorithm: "ed25519", // default
+	}
+	
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, ":") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+				
+				switch key {
+				case "VERSION":
+					if v, err := strconv.Atoi(value); err == nil {
+						metadata.Version = v
+					}
+				case "ISSUED_AT":
+					if v, err := strconv.ParseInt(value, 10, 64); err == nil {
+						metadata.IssuedAt = v
+					}
+				case "EXPIRES_AT":
+					if v, err := strconv.ParseInt(value, 10, 64); err == nil {
+						metadata.ExpiresAt = v
+					}
+				case "ALGORITHM":
+					metadata.Algorithm = value
+				case "KEY":
+					metadata.Key = value
+				}
+			}
+		}
+	}
+	
+	if metadata.Key == "" {
+		return nil, fmt.Errorf("no public key found in metadata")
+	}
+	
+	return metadata, nil
+}
+
+// parseKeyMetadataSimple is a fallback simple parser for when Box binary is not available
+func parseKeyMetadataSimple(content string) (*KeyMetadata, error) {
+	metadata := &KeyMetadata{
+		Algorithm: "ed25519", // default
+	}
+	
+	lines := strings.Split(content, "\n")
+	inKeyInfo := false
+	inPubKey := false
+	
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		
+		// Check for block start/end
+		if strings.HasPrefix(line, "[data -c keyinfo]") {
+			inKeyInfo = true
+			inPubKey = false
+			continue
+		} else if strings.HasPrefix(line, "[data -c pubkey]") {
+			inKeyInfo = false
+			inPubKey = true
+			continue
+		} else if line == "end" {
+			inKeyInfo = false
+			inPubKey = false
+			continue
+		}
+		
+		// Parse fields within blocks
+		if inKeyInfo && strings.Contains(line, " ") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				switch parts[0] {
+				case "version":
+					if v, err := strconv.Atoi(parts[1]); err == nil {
+						metadata.Version = v
+					}
+				case "issued_at":
+					if v, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+						metadata.IssuedAt = v
+					}
+				case "expires_at":
+					if v, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+						metadata.ExpiresAt = v
+					}
+				case "algorithm":
+					metadata.Algorithm = parts[1]
+				}
+			}
+		} else if inPubKey && strings.Contains(line, " ") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 && parts[0] == "key" {
+				metadata.Key = parts[1]
+			}
+		}
+	}
+	
+	if metadata.Key == "" {
+		return nil, fmt.Errorf("no public key found in metadata")
+	}
+	
+	return metadata, nil
 }
 
 // refreshPublicKeys updates cached public keys from all configured sources
