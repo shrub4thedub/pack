@@ -1,0 +1,13 @@
+import package
+
+[main]  
+  echo "Debug test:"
+  echo "Package: ${package.lock.package}"
+  
+  # Test the problematic line
+  if exists ${package.lock.installed_to}
+    echo "File exists"
+  else  
+    echo "File does not exist"
+  end
+end

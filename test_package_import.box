@@ -1,0 +1,5 @@
+import package
+
+[main]
+  echo "Package: ${package.lock.package}"
+end
