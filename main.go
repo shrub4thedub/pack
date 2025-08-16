@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -100,15 +101,26 @@ func main() {
 
 
 func openPackage(args []string) {
-	if args[0] == "help" {
+	if len(args) > 0 && args[0] == "help" {
 		showOpenHelp()
 		return
 	}
 	
-	packageName := args[0]
-	fmt.Printf("opening package: %s\n", packageName)
+	if len(args) == 0 {
+		fmt.Println("error: package name required")
+		fmt.Println("usage: pack open <package> [--verbose]")
+		os.Exit(1)
+	}
 	
-	if err := executePackageScript(packageName, false); err != nil {
+	packageName := args[0]
+	verbose := false
+	
+	// Check for verbose flag
+	if len(args) > 1 && (args[1] == "--verbose" || args[1] == "-v") {
+		verbose = true
+	}
+	
+	if err := executePackageScript(packageName, false, verbose); err != nil {
 		fmt.Printf("error opening package %s: %v\n", packageName, err)
 		os.Exit(1)
 	}
@@ -159,27 +171,24 @@ func addSource(args []string) {
 	fmt.Printf("added source: %s\n", sourceURL)
 }
 
-func executePackageScript(packageName string, uninstall bool) error {
+func executePackageScript(packageName string, uninstall bool, verbose ...bool) error {
+	isVerbose := len(verbose) > 0 && verbose[0]
 	// Uninstall is now handled by executeUninstallScript
 	if uninstall {
 		return executeUninstallScript(packageName)
 	}
-	// Create temporary directory for script
+	
 	tempDir, err := os.MkdirTemp("", "pack-"+packageName)
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Download or copy script using multi-source selection
 	scriptPath := filepath.Join(tempDir, packageName+".box")
-	
 	selectedSource, err := downloadFromSources(packageName, scriptPath)
 	if err != nil {
 		return fmt.Errorf("failed to download script: %v", err)
 	}
-	
-	// Note: selectedSource.Name used to be stored as sourceURL, now using repoName instead
 
 	// Verify recipe integrity
 	fmt.Println("verifying recipe integrity...")
@@ -204,26 +213,31 @@ func executePackageScript(packageName string, uninstall bool) error {
 		return err
 	}
 
-	// Find box executable
 	boxPath, err := findBoxExecutable()
 	if err != nil {
 		return fmt.Errorf("box executable not found: %v", err)
 	}
 
-	// Execute script
+	// Always show normal output for installs (no progress bar unless verbose flag used)
 	cmdArgs := []string{scriptPath}
-
 	execCmd := exec.Command(boxPath, cmdArgs...)
+	
+	if isVerbose {
+		fmt.Println("executing installation script...")
+	} else {
+		fmt.Println("installing package...")
+	}
+	
 	execCmd.Stdout = os.Stdout
 	execCmd.Stderr = os.Stderr
 	execCmd.Stdin = os.Stdin
-
+	
 	err = execCmd.Run()
 	if err != nil {
-		return err
+		return fmt.Errorf("script execution failed: %v", err)
 	}
-
-	// Create or update lock file after successful installation
+	
+	fmt.Println("✓ installation complete")
 	fmt.Println("creating lock file...")
 	
 	// Extract source information from canonical schema
@@ -701,6 +715,32 @@ end`
 	return os.WriteFile(configFile, []byte(defaultConfig), 0644)
 }
 
+// Simple progress bar for updates
+func showProgress(current, total int, message string) {
+	percent := float64(current) / float64(total) * 100
+	barWidth := 30
+	filled := int(percent / 100.0 * float64(barWidth))
+	
+	bar := "["
+	for i := 0; i < barWidth; i++ {
+		if i < filled {
+			bar += "="
+		} else if i == filled && current < total {
+			bar += ">"
+		} else {
+			bar += " "
+		}
+	}
+	bar += "]"
+	
+	fmt.Printf("\r%s %3.0f%% (%d/%d) %s", bar, percent, current, total, message)
+	if current >= total {
+		fmt.Println()
+	}
+}
+
+// These functions are now only used for updates, not installs
+
 func ensureBoxExists() error {
 	// Check if box is available in PATH
 	if _, err := exec.LookPath("box"); err == nil {
@@ -732,7 +772,10 @@ func ensureBoxExists() error {
 }
 
 func bootstrapBoxMinimal() error {
+	fmt.Println("bootstrapping box interpreter...")
+	
 	// For bootstrapping, we'll download and build box directly
+	showProgress(1, 4, "creating temporary directory...")
 	tempDir, err := os.MkdirTemp("", "box-bootstrap-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %v", err)
@@ -740,16 +783,20 @@ func bootstrapBoxMinimal() error {
 	defer os.RemoveAll(tempDir)
 
 	// Clone boxlang repository
-	fmt.Println("cloning boxlang repository...")
+	showProgress(2, 4, "cloning boxlang repository...")
 	cloneCmd := exec.Command("git", "clone", "https://github.com/shrub4thedub/boxlang.git", tempDir)
+	cloneCmd.Stdout = nil // Suppress git output
+	cloneCmd.Stderr = nil
 	if err := cloneCmd.Run(); err != nil {
 		return fmt.Errorf("failed to clone boxlang repository: %v", err)
 	}
 
 	// Build box
-	fmt.Println("building box interpreter...")
+	showProgress(3, 4, "building box interpreter...")
 	buildCmd := exec.Command("go", "build", "-o", "box", "cmd/box/main.go")
 	buildCmd.Dir = tempDir
+	buildCmd.Stdout = nil // Suppress build output
+	buildCmd.Stderr = nil
 	if err := buildCmd.Run(); err != nil {
 		return fmt.Errorf("failed to build box: %v", err)
 	}
@@ -766,6 +813,7 @@ func bootstrapBoxMinimal() error {
 	}
 
 	// Copy box to ~/.local/bin
+	showProgress(4, 4, "installing box binary...")
 	boxSrc := filepath.Join(tempDir, "box")
 	boxDst := filepath.Join(localBinDir, "box")
 	
@@ -790,7 +838,7 @@ func bootstrapBoxMinimal() error {
 		return fmt.Errorf("failed to make box executable: %v", err)
 	}
 
-	fmt.Printf("box interpreter installed to %s\n", boxDst)
+	fmt.Printf("✓ box interpreter installed to %s\n", boxDst)
 	fmt.Printf("add %s to your PATH if it's not already included\n", localBinDir)
 	
 	return nil
@@ -1002,7 +1050,7 @@ func downloadFromSources(packageName string, scriptPath string) (PackageSource, 
 		}
 	}
 	
-	fmt.Printf("Using source: %s\n", selectedSource.Name)
+	// Source selected, continue silently
 	
 	// Download from selected source
 	if selectedSource.Type == "local" {
@@ -1712,8 +1760,6 @@ func updatePackages(args []string) {
 		return
 	}
 	
-	fmt.Println("scanning for package updates...")
-	
 	availableUpdates, err := scanForUpdates()
 	if err != nil {
 		fmt.Printf("error scanning for updates: %v\n", err)
@@ -1752,16 +1798,18 @@ func updatePackages(args []string) {
 
 	// Perform updates
 	fmt.Println("\nupdating packages...")
-	for _, update := range availableUpdates {
-		fmt.Printf("Updating %s...\n", update.PackageName)
+	total := len(availableUpdates)
+	
+	for i, update := range availableUpdates {
+		showProgress(i, total, fmt.Sprintf("updating %s...", update.PackageName))
 		if err := updatePackageFromOriginalSource(update.PackageName); err != nil {
-			fmt.Printf("error updating %s: %v\n", update.PackageName, err)
+			fmt.Printf("\nerror updating %s: %v\n", update.PackageName, err)
 		} else {
-			fmt.Printf("✓ %s updated successfully\n", update.PackageName)
+			showProgress(i+1, total, fmt.Sprintf("updated %s", update.PackageName))
 		}
 	}
 	
-	fmt.Println("\nupdate complete!")
+	fmt.Println("update complete!")
 }
 
 // PackageUpdate represents an available update
@@ -1791,20 +1839,27 @@ func scanForUpdates() ([]PackageUpdate, error) {
 		return nil, err
 	}
 
+	// Filter for lock files only
+	var lockFiles []string
 	for _, file := range files {
-		if !strings.HasSuffix(file.Name(), ".lock") {
-			continue
+		if strings.HasSuffix(file.Name(), ".lock") {
+			lockFiles = append(lockFiles, file.Name())
 		}
+	}
 
-		packageName := strings.TrimSuffix(file.Name(), ".lock")
-		lockData, err := parseLockFile(filepath.Join(locksDir, file.Name()))
+	total := len(lockFiles)
+	for i, fileName := range lockFiles {
+		packageName := strings.TrimSuffix(fileName, ".lock")
+		showProgress(i+1, total, fmt.Sprintf("checking %s...", packageName))
+		
+		lockData, err := parseLockFile(filepath.Join(locksDir, fileName))
 		if err != nil {
 			continue // Skip problematic lock files
 		}
 
 		update, hasUpdate, err := checkPackageForUpdate(packageName, lockData)
 		if err != nil {
-			fmt.Printf("warning: failed to check updates for %s: %v\n", packageName, err)
+			fmt.Printf("\nwarning: failed to check updates for %s: %v\n", packageName, err)
 			continue
 		}
 
@@ -2133,12 +2188,16 @@ func showOpenHelp() {
 	fmt.Println("pack open - install a package")
 	fmt.Println()
 	fmt.Println("USAGE:")
-	fmt.Println("  pack open <package>")
+	fmt.Println("  pack open <package> [--verbose]")
 	fmt.Println("  pack open help")
+	fmt.Println()
+	fmt.Println("OPTIONS:")
+	fmt.Println("  --verbose, -v    show all installation output instead of progress bar")
 	fmt.Println()
 	fmt.Println("DESCRIPTION:")
 	fmt.Println("  downloads and installs a package from configured sources.")
 	fmt.Println("  if multiple sources have the package, you'll be prompted to choose.")
+	fmt.Println("  by default shows a progress bar, use --verbose to see all output.")
 	fmt.Println()
 	fmt.Println("  the installation process:")
 	fmt.Println("  1. finds the package in available sources")
