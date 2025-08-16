@@ -19,7 +19,7 @@ go build -o pack main.go
 
 ## how it works
 
-pack downloads `.box` scripts that contain installation instructions. these scripts use the box language (think shell but deterministic) to fetch source code, build it, and install binaries.
+pack downloads `.box` scripts that contain installation instructions. these scripts use the boxlang (my fucked up scripting language) to fetch source code, build it, and install binaries. it shows you and lets you edit the script before install, so no fuckery
 
 ```bash
 # see what's available
@@ -70,7 +70,7 @@ pack add-source https://github.com/yourname/your-pack-repo
 # see configured sources
 cat ~/.pack/config/sources.box
 ```
-
+and you can make your own repos to host your own packages.
 ## writing packages
 
 create a `.box` file that defines how to build and install your software:
