@@ -177,7 +177,12 @@ func executePackageScript(packageName string, uninstall bool, verbose ...bool) e
 		return executeUninstallScript(packageName)
 	}
 	
-	tempDir, err := os.MkdirTemp("", "pack-"+packageName)
+	packPath, err := getPackDir()
+	if err != nil {
+		return fmt.Errorf("failed to get pack directory: %v", err)
+	}
+	packTmpDir := filepath.Join(packPath, "tmp")
+	tempDir, err := os.MkdirTemp(packTmpDir, "pack-"+packageName)
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %v", err)
 	}
@@ -220,6 +225,9 @@ func executePackageScript(packageName string, uninstall bool, verbose ...bool) e
 	// Always show normal output for installs (no progress bar unless verbose flag used)
 	cmdArgs := []string{scriptPath}
 	execCmd := exec.Command(boxPath, cmdArgs...)
+	
+	// Set working directory to the temp directory to contain build debris
+	execCmd.Dir = tempDir
 	
 	if isVerbose {
 		fmt.Println("executing installation script...")
@@ -1628,8 +1636,13 @@ func executeUninstallScript(packageName string) error {
 		return fmt.Errorf("failed to parse lock file: %v", err)
 	}
 	
-	// Create temporary directory for uninstall
-	tempDir, err := os.MkdirTemp("", "pack-uninstall-"+packageName)
+	// Create temporary directory for uninstall in .pack/tmp
+	packPath, err := getPackDir()
+	if err != nil {
+		return fmt.Errorf("failed to get pack directory: %v", err)
+	}
+	packTmpDir := filepath.Join(packPath, "tmp")
+	tempDir, err := os.MkdirTemp(packTmpDir, "pack-uninstall-"+packageName)
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %v", err)
 	}
@@ -2019,8 +2032,13 @@ func updatePackageFromOriginalSource(packageName string) error {
 		return fmt.Errorf("no original repo found in lock file")
 	}
 
-	// Create temporary directory for script
-	tempDir, err := os.MkdirTemp("", "pack-update-"+packageName)
+	// Create temporary directory for script in .pack/tmp
+	packPath, err := getPackDir()
+	if err != nil {
+		return fmt.Errorf("failed to get pack directory: %v", err)
+	}
+	packTmpDir := filepath.Join(packPath, "tmp")
+	tempDir, err := os.MkdirTemp(packTmpDir, "pack-update-"+packageName)
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %v", err)
 	}
@@ -2103,6 +2121,7 @@ func updatePackageFromOriginalSource(packageName string) error {
 	execCmd.Stdout = os.Stdout
 	execCmd.Stderr = os.Stderr
 	execCmd.Stdin = os.Stdin
+	execCmd.Dir = tempDir
 
 	err = execCmd.Run()
 	if err != nil {
