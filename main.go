@@ -34,6 +34,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Bootstrap box interpreter if missing
+	if err := ensureBoxExists(); err != nil {
+		fmt.Printf("failed to bootstrap box interpreter: %v\n", err)
+		os.Exit(1)
+	}
+
 	args := os.Args[1:]
 	if len(args) == 0 {
 		showHelp()
@@ -693,6 +699,101 @@ func ensureConfigExists() error {
 end`
 	
 	return os.WriteFile(configFile, []byte(defaultConfig), 0644)
+}
+
+func ensureBoxExists() error {
+	// Check if box is available in PATH
+	if _, err := exec.LookPath("box"); err == nil {
+		return nil // box is available
+	}
+
+	fmt.Println("box interpreter not found, bootstrapping...")
+
+	// Get user's home directory
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %v", err)
+	}
+
+	// Check if box exists in ~/.local/bin
+	localBinDir := filepath.Join(homeDir, ".local", "bin")
+	boxPath := filepath.Join(localBinDir, "box")
+	
+	if _, err := os.Stat(boxPath); err == nil {
+		fmt.Printf("found box at %s\n", boxPath)
+		return nil // box exists in ~/.local/bin
+	}
+
+	// Bootstrap box by installing it via pack
+	fmt.Println("installing box interpreter...")
+	
+	// Create a minimal box bootstrap without using box itself
+	return bootstrapBoxMinimal()
+}
+
+func bootstrapBoxMinimal() error {
+	// For bootstrapping, we'll download and build box directly
+	tempDir, err := os.MkdirTemp("", "box-bootstrap-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Clone boxlang repository
+	fmt.Println("cloning boxlang repository...")
+	cloneCmd := exec.Command("git", "clone", "https://github.com/shrub4thedub/boxlang.git", tempDir)
+	if err := cloneCmd.Run(); err != nil {
+		return fmt.Errorf("failed to clone boxlang repository: %v", err)
+	}
+
+	// Build box
+	fmt.Println("building box interpreter...")
+	buildCmd := exec.Command("go", "build", "-o", "box", "cmd/box/main.go")
+	buildCmd.Dir = tempDir
+	if err := buildCmd.Run(); err != nil {
+		return fmt.Errorf("failed to build box: %v", err)
+	}
+
+	// Get user's home directory and create ~/.local/bin
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %v", err)
+	}
+
+	localBinDir := filepath.Join(homeDir, ".local", "bin")
+	if err := os.MkdirAll(localBinDir, 0755); err != nil {
+		return fmt.Errorf("failed to create ~/.local/bin: %v", err)
+	}
+
+	// Copy box to ~/.local/bin
+	boxSrc := filepath.Join(tempDir, "box")
+	boxDst := filepath.Join(localBinDir, "box")
+	
+	srcFile, err := os.Open(boxSrc)
+	if err != nil {
+		return fmt.Errorf("failed to open source box binary: %v", err)
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(boxDst)
+	if err != nil {
+		return fmt.Errorf("failed to create destination box binary: %v", err)
+	}
+	defer dstFile.Close()
+
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		return fmt.Errorf("failed to copy box binary: %v", err)
+	}
+
+	// Make box executable
+	if err := os.Chmod(boxDst, 0755); err != nil {
+		return fmt.Errorf("failed to make box executable: %v", err)
+	}
+
+	fmt.Printf("box interpreter installed to %s\n", boxDst)
+	fmt.Printf("add %s to your PATH if it's not already included\n", localBinDir)
+	
+	return nil
 }
 
 func loadConfig() (*Config, error) {
