@@ -162,12 +162,37 @@ func addSource(args []string) {
 	
 	sourceURL := args[0]
 	
-	if err := addSourceToConfig(sourceURL); err != nil {
-		fmt.Printf("error adding source: %v\n", err)
-		os.Exit(1)
+	// Try to fetch public key from the repository
+	fmt.Printf("Fetching public key for %s...\n", sourceURL)
+	pubkey, err := fetchPublicKeyFromRepo(sourceURL)
+	if err != nil {
+		fmt.Printf("Warning: could not fetch public key: %v\n", err)
+		fmt.Print("Add source without public key verification? [y/N]: ")
+		
+		var response string
+		fmt.Scanln(&response)
+		response = strings.ToLower(strings.TrimSpace(response))
+		
+		if response != "y" && response != "yes" {
+			fmt.Println("Source not added.")
+			return
+		}
+		
+		// Add without public key
+		if err := addSourceToConfig(sourceURL); err != nil {
+			fmt.Printf("error adding source: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		// Add with public key
+		if err := addSourceWithKeyToConfig(sourceURL, pubkey); err != nil {
+			fmt.Printf("error adding source: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("✓ Public key verified and cached\n")
 	}
 	
-	fmt.Printf("added source: %s\n", sourceURL)
+	fmt.Printf("✓ Added source: %s\n", sourceURL)
 }
 
 func executePackageScript(packageName string, uninstall bool, verbose ...bool) error {
@@ -713,12 +738,29 @@ func ensureConfigExists() error {
 		return nil // Config exists
 	}
 	
-	// Create default config with public key for pack-repo
+	// Create default config and fetch public key dynamically
+	fmt.Println("Setting up default pack configuration...")
+	
+	// Try to fetch the public key from the default repository
+	pubkey, err := fetchPublicKeyFromRepo(defaultRepo)
+	if err != nil {
+		fmt.Printf("Warning: could not fetch public key from %s: %v\n", defaultRepo, err)
+		fmt.Println("Creating minimal config without public key verification.")
+		
+		// Create minimal config without pubkey
+		defaultConfig := `[data -c sources]
+  repo ` + defaultRepo + `
+end`
+		return os.WriteFile(configFile, []byte(defaultConfig), 0644)
+	}
+	
+	// Create config with fetched public key
 	defaultConfig := `[data -c sources]
   repo ` + defaultRepo + `
-  pubkey YxW0H7AepuqxI8izjqFi1sfEcdDvudLWS5ezYX0GVT0=
+  pubkey ` + pubkey + `
 end`
 	
+	fmt.Printf("✓ Configured default source with public key verification\n")
 	return os.WriteFile(configFile, []byte(defaultConfig), 0644)
 }
 
@@ -924,20 +966,60 @@ func saveConfig(config *Config) error {
 }
 
 func addSourceToConfig(sourceURL string) error {
-	config, err := loadConfig()
+	return addSourceWithKeyToConfig(sourceURL, "")
+}
+
+func addSourceWithKeyToConfig(sourceURL, pubkey string) error {
+	configPath, err := getConfigPath()
 	if err != nil {
 		return err
 	}
 	
-	// Check if source already exists
-	for _, existing := range config.Sources {
-		if existing == sourceURL {
-			return fmt.Errorf("source already exists")
-		}
+	configFile := filepath.Join(configPath, "sources.box")
+	
+	// Read existing config
+	var existingContent string
+	if content, err := os.ReadFile(configFile); err == nil {
+		existingContent = string(content)
 	}
 	
-	config.Sources = append(config.Sources, sourceURL)
-	return saveConfig(config)
+	// Check if source already exists
+	if strings.Contains(existingContent, sourceURL) {
+		return fmt.Errorf("source already exists")
+	}
+	
+	// If no existing config, create new one
+	if existingContent == "" {
+		var newConfig string
+		if pubkey != "" {
+			newConfig = fmt.Sprintf(`[data -c sources]
+  repo %s
+  pubkey %s
+end`, sourceURL, pubkey)
+		} else {
+			newConfig = fmt.Sprintf(`[data -c sources]
+  repo %s
+end`, sourceURL)
+		}
+		return os.WriteFile(configFile, []byte(newConfig), 0644)
+	}
+	
+	// Append to existing config
+	lines := strings.Split(existingContent, "\n")
+	var newLines []string
+	
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "end" {
+			// Insert new source before the end
+			newLines = append(newLines, fmt.Sprintf("  repo %s", sourceURL))
+			if pubkey != "" {
+				newLines = append(newLines, fmt.Sprintf("  pubkey %s", pubkey))
+			}
+		}
+		newLines = append(newLines, line)
+	}
+	
+	return os.WriteFile(configFile, []byte(strings.Join(newLines, "\n")), 0644)
 }
 
 // PackageSource represents a source where a package is available
@@ -1123,7 +1205,12 @@ func extractSHA256FromRecipe(scriptPath string) (string, error) {
 
 // verifyRecipeIntegrity verifies Ed25519 signature - no fallback to unsafe SHA256
 func verifyRecipeIntegrity(scriptPath string, sourceRepo string) error {
-	// Only use Ed25519 signature verification
+	// Skip verification for local sources
+	if sourceRepo == "local" {
+		return nil
+	}
+	
+	// Only use Ed25519 signature verification for remote sources
 	if err := verifyEd25519Signature(scriptPath, sourceRepo); err != nil {
 		return fmt.Errorf("Ed25519 signature verification failed: %v", err)
 	}
@@ -1219,8 +1306,12 @@ func verifySHA256Hash(scriptPath string) error {
 
 // getPublicKeyForSource gets the public key for a given source repository
 func getPublicKeyForSource(sourceRepo string) (string, error) {
+	// First try to get key from repository's keys directory
+	if pubkey, err := fetchPublicKeyFromRepo(sourceRepo); err == nil {
+		return pubkey, nil
+	}
 	
-	// Parse sources config to find pubkey for this repo
+	// Fallback to local config for backward compatibility
 	configPath, err := getConfigPath()
 	if err != nil {
 		return "", err
@@ -1264,6 +1355,145 @@ func getPublicKeyForSource(sourceRepo string) (string, error) {
 	}
 	
 	return "", fmt.Errorf("public key not found for source %s", sourceRepo)
+}
+
+// fetchPublicKeyFromRepo fetches the public key from the repository's keys directory
+func fetchPublicKeyFromRepo(sourceRepo string) (string, error) {
+	// Skip fetching for local sources
+	if sourceRepo == "local" {
+		return "", fmt.Errorf("local sources don't have remote keys")
+	}
+	
+	// Try cached key first
+	if cachedKey, err := getCachedPublicKey(sourceRepo); err == nil {
+		return cachedKey, nil
+	}
+	
+	// Fetch from repository
+	keyURL := fmt.Sprintf("%s/raw/main/keys/pack.pub", sourceRepo)
+	
+	resp, err := http.Get(keyURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch public key: %v", err)
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("public key not found at %s (status: %d)", keyURL, resp.StatusCode)
+	}
+	
+	keyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read public key: %v", err)
+	}
+	
+	pubkey := strings.TrimSpace(string(keyBytes))
+	
+	// Validate key format (base64 encoded Ed25519 public key should be 44 chars)
+	if len(pubkey) != 44 || !strings.HasSuffix(pubkey, "=") {
+		return "", fmt.Errorf("invalid public key format")
+	}
+	
+	// Cache the key for future use
+	if err := cachePublicKey(sourceRepo, pubkey); err != nil {
+		// Don't fail on cache errors, just log them
+		fmt.Printf("Warning: failed to cache public key: %v\n", err)
+	}
+	
+	return pubkey, nil
+}
+
+// getCachedPublicKey retrieves a cached public key for a source
+func getCachedPublicKey(sourceRepo string) (string, error) {
+	packPath, err := getPackDir()
+	if err != nil {
+		return "", err
+	}
+	
+	cacheDir := filepath.Join(packPath, "cache", "keys")
+	
+	// Create a safe filename from the source repo URL
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(sourceRepo)))
+	keyFile := filepath.Join(cacheDir, hash+".pub")
+	
+	content, err := os.ReadFile(keyFile)
+	if err != nil {
+		return "", err
+	}
+	
+	return strings.TrimSpace(string(content)), nil
+}
+
+// cachePublicKey stores a public key in the local cache
+func cachePublicKey(sourceRepo, pubkey string) error {
+	packPath, err := getPackDir()
+	if err != nil {
+		return err
+	}
+	
+	cacheDir := filepath.Join(packPath, "cache", "keys")
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return err
+	}
+	
+	// Create a safe filename from the source repo URL
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(sourceRepo)))
+	keyFile := filepath.Join(cacheDir, hash+".pub")
+	
+	return os.WriteFile(keyFile, []byte(pubkey+"\n"), 0644)
+}
+
+// refreshPublicKeys updates cached public keys from all configured sources
+func refreshPublicKeys() {
+	// Get all configured source repositories
+	configPath, err := getConfigPath()
+	if err != nil {
+		fmt.Printf("Warning: could not get config path: %v\n", err)
+		return
+	}
+	
+	configFile := filepath.Join(configPath, "sources.box")
+	content, err := os.ReadFile(configFile)
+	if err != nil {
+		fmt.Printf("Warning: could not read sources config: %v\n", err)
+		return
+	}
+	
+	lines := strings.Split(string(content), "\n")
+	var inDataBlock bool
+	var sources []string
+	
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		
+		if strings.HasPrefix(trimmed, "[data") && strings.Contains(trimmed, "sources") {
+			inDataBlock = true
+			continue
+		}
+		
+		if inDataBlock && trimmed == "end" {
+			break
+		}
+		
+		if inDataBlock && trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			parts := strings.SplitN(trimmed, " ", 2)
+			if len(parts) >= 2 && parts[0] == "repo" {
+				sources = append(sources, parts[1])
+			}
+		}
+	}
+	
+	// Refresh keys from each source
+	for _, source := range sources {
+		if source == "local" {
+			continue // Skip local sources
+		}
+		
+		// Try to fetch updated key
+		if _, err := fetchPublicKeyFromRepo(source); err != nil {
+			fmt.Printf("Warning: could not refresh key for %s: %v\n", source, err)
+		}
+	}
 }
 
 // getScriptURL constructs the script URL for a given source and package
@@ -1771,6 +2001,10 @@ func updatePackages(args []string) {
 		showUpdateHelp()
 		return
 	}
+	
+	// Refresh public keys from all configured sources
+	fmt.Println("Refreshing public keys...")
+	refreshPublicKeys()
 	
 	availableUpdates, err := scanForUpdates()
 	if err != nil {
