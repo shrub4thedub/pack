@@ -1,0 +1,8 @@
+import package
+
+[main]
+  echo "Test 1: ${package.lock.package}"
+  echo "Test 2: ${package.lock.installed_to}"
+  set test_var ${package.lock.installed_to}
+  echo "Test 3: ${test_var}"
+end

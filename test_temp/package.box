@@ -1,0 +1,10 @@
+[data -c lock]
+  package 9dir
+  version 0.1
+  source https://github.com/shrub4thedub/pack-repo
+  commit cc951fe2
+  installed_at 2025-08-14T18:09:29Z
+  recipe_sha256 4e49cfce800464c762ff15a7ad27680d27f2b0bf422c409cc8d337123aefdbaa
+  installed_to /home/shrub/.local/bin/9dir
+  config_dir /home/shrub/.config/9dir
+end

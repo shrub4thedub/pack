@@ -1,0 +1,25 @@
+[data -c lock]
+  package edith
+  version 0.1
+  source local
+  commit unknown
+  installed_at 2025-08-15T22:54:07Z
+  sha256 edcb155e92e4d3d201d08eebe52fa0c75373e7ae8558221b9fa015d20ee14b67
+  installed_to /home/shrub/.local/bin/edith
+  config_dir /home/shrub/.config/edith
+end
+
+[fn uninstall]
+  echo "Uninstalling ${lock.package}..."
+  
+  echo "Removing binary at: ${lock.installed_to}"
+  delete ${lock.installed_to}
+  echo "Removed ${lock.package} binary"
+  
+  echo "Config directory ${lock.config_dir} will be preserved (remove manually if desired)"
+  echo "${lock.package} uninstallation complete\!"
+end
+
+[main]
+  uninstall
+end

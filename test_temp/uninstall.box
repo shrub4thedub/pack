@@ -1,0 +1,35 @@
+# Universal uninstaller for pack
+# Imports lock file data and removes installed files
+
+import package
+
+[fn uninstall]
+  echo "Uninstalling ${package.lock.package}..."
+  
+  # Remove installed binary
+  if exists ${package.lock.installed_to}
+    delete ${package.lock.installed_to}
+    echo "Removed ${package.lock.package} from ${package.lock.installed_to}"
+  else
+    echo "${package.lock.package} binary not found at ${package.lock.installed_to}"
+  end
+  
+  # Check if config directory exists and ask user
+  if exists ${package.lock.config_dir}
+    echo "Config directory found at ${package.lock.config_dir}"
+    echo "Remove config directory? [y/N]: "
+    read response
+    if match ${response} "y|yes|Y|YES"
+      delete ${package.lock.config_dir}
+      echo "Removed config directory ${package.lock.config_dir}"
+    else
+      echo "Config directory preserved at ${package.lock.config_dir}"
+    end
+  end
+  
+  echo "${package.lock.package} uninstallation complete!"
+end
+
+[main]
+  uninstall
+end

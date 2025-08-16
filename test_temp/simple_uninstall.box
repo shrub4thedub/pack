@@ -1,0 +1,14 @@
+import package
+
+[fn uninstall]
+  echo "Uninstalling ${package.lock.package}..."
+  
+  # Remove installed binary
+  if exists ${package.lock.installed_to}
+    echo "Found binary"
+  end
+end
+
+[main]
+  uninstall
+end
