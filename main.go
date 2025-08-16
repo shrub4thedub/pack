@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -13,8 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/spf13/cobra"
 )
 
 const (
@@ -33,81 +33,57 @@ func main() {
 		os.Exit(1)
 	}
 
-	var rootCmd = &cobra.Command{
-		Use:   "pack",
-		Short: "a package manager using boxlang",
-		Long:  `pack fetches and executes boxlang installation recipes from a repository.`,
-	}
-	rootCmd.SetHelpCommand(&cobra.Command{
-		Use:    "no-help",
-		Hidden: true,
-	})
-
-	var openCmd = &cobra.Command{
-		Use:   "open [package|help]",
-		Short: "install a package",
-		Args:  cobra.ExactArgs(1),
-		Run:   openPackage,
+	args := os.Args[1:]
+	if len(args) == 0 {
+		showHelp()
+		return
 	}
 
-	var closeCmd = &cobra.Command{
-		Use:   "close [package|help]",
-		Short: "uninstall a package",
-		Args:  cobra.ExactArgs(1),
-		Run:   closePackage,
-	}
-
-	var peekCmd = &cobra.Command{
-		Use:   "peek [package|help]",
-		Short: "show package information",
-		Args:  cobra.ExactArgs(1),
-		Run:   peekPackage,
-	}
-
-	var addSourceCmd = &cobra.Command{
-		Use:   "add-source [url|help]",
-		Short: "add a repository source",
-		Args:  cobra.ExactArgs(1),
-		Run:   addSource,
-	}
-
-	var listCmd = &cobra.Command{
-		Use:   "list [help]",
-		Short: "list installed packages",
-		Args:  cobra.MaximumNArgs(1),
-		Run:   listPackages,
-	}
-
-	var updateCmd = &cobra.Command{
-		Use:   "update [help]",
-		Short: "check for and install package updates",
-		Args:  cobra.MaximumNArgs(1),
-		Run:   updatePackages,
-	}
-
-	var helpCmd = &cobra.Command{
-		Use:   "help",
-		Short: "show help information",
-		Args:  cobra.NoArgs,
-		Run:   showHelp,
-	}
-
-	rootCmd.AddCommand(openCmd)
-	rootCmd.AddCommand(closeCmd)
-	rootCmd.AddCommand(peekCmd)
-	rootCmd.AddCommand(addSourceCmd)
-	rootCmd.AddCommand(listCmd)
-	rootCmd.AddCommand(updateCmd)
-	rootCmd.AddCommand(helpCmd)
-
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
+	command := args[0]
+	switch command {
+	case "open":
+		if len(args) < 2 {
+			fmt.Println("error: package name required")
+			fmt.Println("usage: pack open <package>")
+			os.Exit(1)
+		}
+		openPackage(args[1:])
+	case "close":
+		if len(args) < 2 {
+			fmt.Println("error: package name required")
+			fmt.Println("usage: pack close <package>")
+			os.Exit(1)
+		}
+		closePackage(args[1:])
+	case "peek":
+		if len(args) < 2 {
+			fmt.Println("error: package name required")
+			fmt.Println("usage: pack peek <package>")
+			os.Exit(1)
+		}
+		peekPackage(args[1:])
+	case "list":
+		listPackages(args[1:])
+	case "update":
+		updatePackages(args[1:])
+	case "add-source":
+		if len(args) < 2 {
+			fmt.Println("error: source URL required")
+			fmt.Println("usage: pack add-source <url>")
+			os.Exit(1)
+		}
+		addSource(args[1:])
+	case "help":
+		showHelp()
+	default:
+		fmt.Printf("error: unknown command '%s'\n", command)
+		fmt.Println("run 'pack help' for usage information")
 		os.Exit(1)
 	}
 }
 
 
-func openPackage(cmd *cobra.Command, args []string) {
+func openPackage(args []string) {
 	if args[0] == "help" {
 		showOpenHelp()
 		return
@@ -122,7 +98,7 @@ func openPackage(cmd *cobra.Command, args []string) {
 	}
 }
 
-func closePackage(cmd *cobra.Command, args []string) {
+func closePackage(args []string) {
 	if args[0] == "help" {
 		showCloseHelp()
 		return
@@ -137,7 +113,7 @@ func closePackage(cmd *cobra.Command, args []string) {
 	}
 }
 
-func peekPackage(cmd *cobra.Command, args []string) {
+func peekPackage(args []string) {
 	if args[0] == "help" {
 		showPeekHelp()
 		return
@@ -151,7 +127,7 @@ func peekPackage(cmd *cobra.Command, args []string) {
 	}
 }
 
-func addSource(cmd *cobra.Command, args []string) {
+func addSource(args []string) {
 	if args[0] == "help" {
 		showAddSourceHelp()
 		return
@@ -191,7 +167,7 @@ func executePackageScript(packageName string, uninstall bool) error {
 
 	// Verify recipe integrity
 	fmt.Println("verifying recipe integrity...")
-	if err := verifyRecipeIntegrity(scriptPath); err != nil {
+	if err := verifyRecipeIntegrity(scriptPath, selectedSource.Name); err != nil {
 		fmt.Printf("⚠️  warning: %v\n", err)
 		fmt.Print("continue anyway? [y/N]: ")
 		reader := bufio.NewReader(os.Stdin)
@@ -234,20 +210,21 @@ func executePackageScript(packageName string, uninstall bool) error {
 	// Create or update lock file after successful installation
 	fmt.Println("creating lock file...")
 	
-	// Extract source URL from recipe
-	recipeSourceURL, err := extractRecipeURL(scriptPath)
+	// Extract source information from canonical schema
+	sourceType, recipeSourceURL, sourceRef, sourceVersion, err := detectSourceTypeAndVersion(scriptPath)
 	if err != nil {
-		fmt.Printf("warning: failed to extract source URL: %v\n", err)
-		recipeSourceURL = "unknown"
-	}
-	
-	// Detect source type and get version information
-	sourceType, sourceVersion, err := detectSourceTypeAndVersion(recipeSourceURL)
-	if err != nil {
-		fmt.Printf("warning: failed to detect source type: %v\n", err)
+		fmt.Printf("warning: failed to extract source info: %v\n", err)
+		// Fall back to legacy extraction
+		recipeSourceURL, err = extractRecipeURL(scriptPath)
+		if err != nil {
+			fmt.Printf("warning: failed to extract source URL: %v\n", err)
+			recipeSourceURL = "unknown"
+		}
 		sourceType = "unknown"
 		sourceVersion = "unknown"
+		sourceRef = "unknown"
 	}
+	
 	
 	// Calculate recipe version (content hash)
 	recipeVersion, err := calculateRecipeVersion(scriptPath)
@@ -273,7 +250,7 @@ func executePackageScript(packageName string, uninstall bool) error {
 	// Get repo name from selected source
 	repoName := selectedSource.Name
 	
-	if err := createLockFile(packageName, repoName, recipeSourceURL, sourceType, sourceVersion, recipeVersion, recipeURL, recipeSHA256); err != nil {
+	if err := createLockFile(packageName, repoName, recipeSourceURL, sourceType, sourceRef, sourceVersion, recipeVersion, recipeURL, recipeSHA256); err != nil {
 		fmt.Printf("warning: failed to create lock file: %v\n", err)
 	} else {
 		fmt.Println("✓ lockfile created")
@@ -300,24 +277,108 @@ func copyFile(src, dst string) error {
 }
 
 func downloadFile(url, filepath string) error {
-	resp, err := http.Get(url)
+	return downloadFileWithCache(url, filepath, false)
+}
+
+// downloadFileWithCache downloads a file with optional ETag caching
+func downloadFileWithCache(url, filepath string, useCache bool) error {
+	client := &http.Client{Timeout: 30 * time.Second}
+	
+	// Prepare request
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return err
+	}
+	
+	// Use ETag caching if enabled and cache exists
+	if useCache {
+		if etag, err := loadETag(url); err == nil && etag != "" {
+			req.Header.Set("If-None-Match", etag)
+		}
+	}
+	
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-
+	
+	// Handle 304 Not Modified
+	if resp.StatusCode == http.StatusNotModified {
+		// File hasn't changed, use cached version
+		return nil
+	}
+	
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
 	}
 
+	// Create output file
 	out, err := os.Create(filepath)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
 
+	// Download content
 	_, err = io.Copy(out, resp.Body)
-	return err
+	if err != nil {
+		return err
+	}
+	
+	// Save ETag for future requests if caching is enabled
+	if useCache {
+		if etag := resp.Header.Get("ETag"); etag != "" {
+			saveETag(url, etag)
+		}
+	}
+	
+	return nil
+}
+
+// loadETag loads the cached ETag for a URL
+func loadETag(url string) (string, error) {
+	packPath, err := getPackDir()
+	if err != nil {
+		return "", err
+	}
+	
+	cacheDir := filepath.Join(packPath, "cache")
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", err
+	}
+	
+	// Create filename from URL hash
+	hash := sha256.Sum256([]byte(url))
+	filename := hex.EncodeToString(hash[:])[:16] + ".etag"
+	etagPath := filepath.Join(cacheDir, filename)
+	
+	content, err := os.ReadFile(etagPath)
+	if err != nil {
+		return "", err
+	}
+	
+	return strings.TrimSpace(string(content)), nil
+}
+
+// saveETag saves the ETag for a URL
+func saveETag(url, etag string) error {
+	packPath, err := getPackDir()
+	if err != nil {
+		return err
+	}
+	
+	cacheDir := filepath.Join(packPath, "cache")
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return err
+	}
+	
+	// Create filename from URL hash
+	hash := sha256.Sum256([]byte(url))
+	filename := hex.EncodeToString(hash[:])[:16] + ".etag"
+	etagPath := filepath.Join(cacheDir, filename)
+	
+	return os.WriteFile(etagPath, []byte(etag), 0644)
 }
 
 func findBoxExecutable() (string, error) {
@@ -453,8 +514,8 @@ func parseAndDisplayPackageInfo(scriptPath, packageName string) error {
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		
-		// Check for data block start
-		if strings.HasPrefix(trimmed, "[data") {
+		// Check for data block start (specifically looking for -c pkg block)
+		if strings.HasPrefix(trimmed, "[data") && strings.Contains(trimmed, "pkg") {
 			inDataBlock = true
 			pkgData = make(map[string]string)
 			// Calculate indentation level
@@ -468,7 +529,7 @@ func parseAndDisplayPackageInfo(scriptPath, packageName string) error {
 		}
 		
 		// Check for any other block start (should end data block)
-		if inDataBlock && strings.HasPrefix(trimmed, "[") && !strings.HasPrefix(trimmed, "[data") {
+		if inDataBlock && strings.HasPrefix(trimmed, "[") {
 			break
 		}
 		
@@ -499,7 +560,7 @@ func parseAndDisplayPackageInfo(scriptPath, packageName string) error {
 		return nil
 	}
 
-	// Display fields in a simple format
+	// Display fields in the new canonical order
 	if name, ok := pkgData["name"]; ok {
 		fmt.Printf("name: %s\n", name)
 	}
@@ -509,25 +570,29 @@ func parseAndDisplayPackageInfo(scriptPath, packageName string) error {
 	if ver, ok := pkgData["ver"]; ok {
 		fmt.Printf("version: %s\n", ver)
 	}
-	if os, ok := pkgData["os"]; ok {
-		fmt.Printf("os: %s\n", os)
+	if srcType, ok := pkgData["src-type"]; ok {
+		fmt.Printf("source type: %s\n", srcType)
 	}
-	if author, ok := pkgData["author"]; ok {
-		fmt.Printf("author: %s\n", author)
+	if srcURL, ok := pkgData["src-url"]; ok {
+		fmt.Printf("source url: %s\n", srcURL)
 	}
-	if url, ok := pkgData["url"]; ok {
-		fmt.Printf("url: %s\n", url)
+	if srcRef, ok := pkgData["src-ref"]; ok {
+		fmt.Printf("source ref: %s\n", srcRef)
+	}
+	if bin, ok := pkgData["bin"]; ok {
+		fmt.Printf("binary: %s\n", bin)
 	}
 	if license, ok := pkgData["license"]; ok {
 		fmt.Printf("license: %s\n", license)
 	}
 
-	// Display any other fields
+	// Display any other fields not in the canonical schema
+	canonicalFields := map[string]bool{
+		"name": true, "desc": true, "ver": true, "src-type": true,
+		"src-url": true, "src-ref": true, "bin": true, "license": true,
+	}
 	for key, value := range pkgData {
-		switch key {
-		case "name", "desc", "ver", "os", "author", "url", "license":
-			// Already displayed above
-		default:
+		if !canonicalFields[key] {
 			fmt.Printf("%s: %s\n", key, value)
 		}
 	}
@@ -587,7 +652,7 @@ func ensurePackDirExists() error {
 	}
 	
 	// Create subdirectories
-	subdirs := []string{"locks", "config", "tmp", "local", "store"}
+	subdirs := []string{"locks", "config", "tmp", "local", "store", "cache"}
 	for _, subdir := range subdirs {
 		subdirPath := filepath.Join(packPath, subdir)
 		if err := os.MkdirAll(subdirPath, 0755); err != nil {
@@ -889,8 +954,75 @@ func extractSHA256FromRecipe(scriptPath string) (string, error) {
 	return "", fmt.Errorf("sha256 field not found in recipe data block")
 }
 
-// verifyRecipeIntegrity verifies the SHA256 hash of a recipe
-func verifyRecipeIntegrity(scriptPath string) error {
+// verifyRecipeIntegrity verifies Ed25519 signature - no fallback to unsafe SHA256
+func verifyRecipeIntegrity(scriptPath string, sourceRepo string) error {
+	// Only use Ed25519 signature verification
+	if err := verifyEd25519Signature(scriptPath, sourceRepo); err != nil {
+		return fmt.Errorf("Ed25519 signature verification failed: %v", err)
+	}
+	
+	return nil
+}
+
+// verifyEd25519Signature verifies a detached Ed25519 signature
+func verifyEd25519Signature(scriptPath string, sourceRepo string) error {
+	// Get public key for source
+	pubkey, err := getPublicKeyForSource(sourceRepo)
+	if err != nil {
+		return fmt.Errorf("no public key configured for source: %v", err)
+	}
+	
+	if pubkey == "" {
+		return fmt.Errorf("empty public key for source %s", sourceRepo)
+	}
+	
+	// Decode base64 public key
+	pubkeyBytes, err := base64.StdEncoding.DecodeString(pubkey)
+	if err != nil {
+		return fmt.Errorf("invalid base64 public key: %v", err)
+	}
+	
+	if len(pubkeyBytes) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid public key size: expected %d, got %d", ed25519.PublicKeySize, len(pubkeyBytes))
+	}
+	
+	// Download signature file
+	sigPath := scriptPath + ".sig"
+	sigURL := strings.Replace(getScriptURL(sourceRepo, filepath.Base(scriptPath)), ".box", ".box.sig", 1)
+	
+	if err := downloadFile(sigURL, sigPath); err != nil {
+		return fmt.Errorf("failed to download signature: %v", err)
+	}
+	defer os.Remove(sigPath)
+	
+	// Read signature
+	sigBytes, err := os.ReadFile(sigPath)
+	if err != nil {
+		return fmt.Errorf("failed to read signature: %v", err)
+	}
+	
+	// Decode base64 signature
+	signature, err := base64.StdEncoding.DecodeString(string(sigBytes))
+	if err != nil {
+		return fmt.Errorf("invalid base64 signature: %v", err)
+	}
+	
+	// Read recipe content
+	content, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return fmt.Errorf("failed to read recipe: %v", err)
+	}
+	
+	// Verify signature
+	if !ed25519.Verify(pubkeyBytes, content, signature) {
+		return fmt.Errorf("signature verification failed")
+	}
+	
+	return nil
+}
+
+// verifySHA256Hash performs legacy SHA256 self-verification
+func verifySHA256Hash(scriptPath string) error {
 	// Read the file content
 	content, err := os.ReadFile(scriptPath)
 	if err != nil {
@@ -918,6 +1050,60 @@ func verifyRecipeIntegrity(scriptPath string) error {
 	return nil
 }
 
+// getPublicKeyForSource gets the public key for a given source repository
+func getPublicKeyForSource(sourceRepo string) (string, error) {
+	
+	// Parse sources config to find pubkey for this repo
+	configPath, err := getConfigPath()
+	if err != nil {
+		return "", err
+	}
+	
+	configFile := filepath.Join(configPath, "sources.box")
+	content, err := os.ReadFile(configFile)
+	if err != nil {
+		return "", err
+	}
+	
+	lines := strings.Split(string(content), "\n")
+	var inDataBlock bool
+	var currentRepo string
+	
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		
+		if strings.HasPrefix(trimmed, "[data") && strings.Contains(trimmed, "sources") {
+			inDataBlock = true
+			continue
+		}
+		
+		if inDataBlock && trimmed == "end" {
+			break
+		}
+		
+		if inDataBlock && trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			parts := strings.SplitN(trimmed, " ", 2)
+			if len(parts) >= 2 {
+				switch parts[0] {
+				case "repo":
+					currentRepo = parts[1]
+				case "pubkey":
+					if currentRepo == sourceRepo {
+						return strings.Trim(parts[1], "\""), nil
+					}
+				}
+			}
+		}
+	}
+	
+	return "", fmt.Errorf("public key not found for source %s", sourceRepo)
+}
+
+// getScriptURL constructs the script URL for a given source and package
+func getScriptURL(sourceRepo, packageName string) string {
+	return fmt.Sprintf("%s/raw/main/%s", sourceRepo, packageName)
+}
+
 // getLockFilePath returns the path to a package's lock file
 func getLockFilePath(packageName string) (string, error) {
 	packPath, err := getPackDir()
@@ -929,8 +1115,8 @@ func getLockFilePath(packageName string) (string, error) {
 	return lockPath, nil
 }
 
-// createLockFile creates a lock file for an installed package with comprehensive update information
-func createLockFile(packageName, repo, sourceURL, sourceType, sourceVersion, recipeVersion, recipeURL, recipeSHA256 string) error {
+// createLockFile creates a lock file with unambiguous field names and trust state
+func createLockFile(packageName, repo, sourceURL, sourceType, sourceRef, sourceVersion, recipeVersion, recipeURL, recipeSHA256 string) error {
 	lockFilePath, err := getLockFilePath(packageName)
 	if err != nil {
 		return err
@@ -950,27 +1136,31 @@ func createLockFile(packageName, repo, sourceURL, sourceType, sourceVersion, rec
 	symlinkPath := filepath.Join(homeDir, ".local/bin", packageName)
 	configDir := filepath.Join(homeDir, ".config", packageName)
 	
-	// Create comprehensive lock file content in box syntax
+	// Determine trust state - always ed25519 now
+	trustState := "ed25519"
+	
+	// Create comprehensive lock file content with unambiguous field names
 	lockContent := fmt.Sprintf(`[data -c lock]
   package %s
   repo %s
-  source %s
-  source_type %s
-  source_version %s
-  recipe_version %s
+  src_url %s
+  src_type %s
+  src_ref %s
+  src_ref_used %s
+  recipe_sha256 %s
   recipe_url %s
   installed_at %s
   store_path %s
   symlink_path %s
   config_dir %s
-  sha256 %s
+  trust_state %s
 end
-`, packageName, repo, sourceURL, sourceType, sourceVersion, recipeVersion, recipeURL, time.Now().UTC().Format(time.RFC3339), packageStorePath, symlinkPath, configDir, recipeSHA256)
+`, packageName, repo, sourceURL, sourceType, sourceRef, sourceVersion, recipeVersion, recipeURL, time.Now().UTC().Format(time.RFC3339), packageStorePath, symlinkPath, configDir, trustState)
 	
 	return os.WriteFile(lockFilePath, []byte(lockContent), 0644)
 }
 
-// extractRecipeURL extracts the URL from the recipe data block
+// extractRecipeURL extracts the src-url from the recipe data block
 func extractRecipeURL(scriptPath string) (string, error) {
 	content, err := os.ReadFile(scriptPath)
 	if err != nil {
@@ -992,6 +1182,15 @@ func extractRecipeURL(scriptPath string) (string, error) {
 			break
 		}
 		
+		// Look for src-url field in canonical schema
+		if inDataBlock && strings.HasPrefix(trimmed, "src-url ") {
+			url := strings.TrimSpace(strings.TrimPrefix(trimmed, "src-url"))
+			// Remove surrounding quotes if present
+			url = strings.Trim(url, "\"'")
+			return url, nil
+		}
+		
+		// Fallback to old url field for compatibility
 		if inDataBlock && strings.HasPrefix(trimmed, "url ") {
 			url := strings.TrimSpace(strings.TrimPrefix(trimmed, "url"))
 			// Remove surrounding quotes if present
@@ -1000,27 +1199,116 @@ func extractRecipeURL(scriptPath string) (string, error) {
 		}
 	}
 	
-	return "", fmt.Errorf("url not found in recipe")
+	return "", fmt.Errorf("src-url not found in recipe")
 }
 
-// detectSourceTypeAndVersion determines the source type and captures version information
-func detectSourceTypeAndVersion(sourceURL string) (sourceType, sourceVersion string, err error) {
-	// Determine source type based on URL patterns
-	if strings.Contains(sourceURL, "github.com") || strings.Contains(sourceURL, "gitlab.com") || strings.HasSuffix(sourceURL, ".git") {
-		sourceType = "git"
-		// For git sources, get the latest commit hash
-		sourceVersion, err = getGitHeadCommit(sourceURL)
+// detectSourceTypeAndVersion extracts and validates source info from canonical recipe schema
+func detectSourceTypeAndVersion(scriptPath string) (sourceType, sourceURL, sourceRef, sourceVersion string, err error) {
+	// Extract source fields from canonical recipe schema
+	sourceType, sourceURL, sourceRef, err = extractSourceFields(scriptPath)
+	if err != nil {
+		// Fall back to legacy url field
+		legacyURL, legacyErr := extractRecipeURL(scriptPath)
+		if legacyErr != nil {
+			return "", "", "", "", fmt.Errorf("failed to extract source info: %v", err)
+		}
+		
+		// Infer source type from legacy URL
+		if strings.Contains(legacyURL, "github.com") || strings.Contains(legacyURL, "gitlab.com") || strings.HasSuffix(legacyURL, ".git") {
+			sourceType = "git"
+			sourceURL = legacyURL
+			sourceRef = "HEAD"
+		} else {
+			sourceType = "archive"
+			sourceURL = legacyURL
+			sourceRef = "latest"
+		}
+	}
+	
+	// Get actual version based on source type
+	switch sourceType {
+	case "git":
+		sourceVersion, err = getGitRefCommit(sourceURL, sourceRef)
 		if err != nil {
 			sourceVersion = "unknown"
 			err = nil // Don't fail installation for version detection issues
 		}
-	} else {
-		sourceType = "download"
-		// For direct downloads, we'll calculate hash after download
-		sourceVersion = "pending" // Will be updated after file download
+	case "archive", "file":
+		// For archives and files, use the ref as version
+		sourceVersion = sourceRef
+	default:
+		sourceVersion = "unknown"
 	}
 	
-	return sourceType, sourceVersion, nil
+	return sourceType, sourceURL, sourceRef, sourceVersion, nil
+}
+
+// extractSourceFields extracts src-type, src-url, and src-ref from canonical recipe schema
+func extractSourceFields(scriptPath string) (srcType, srcURL, srcRef string, err error) {
+	content, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	lines := strings.Split(string(content), "\n")
+	inDataBlock := false
+	
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		
+		if strings.HasPrefix(trimmed, "[data") && strings.Contains(trimmed, "pkg") {
+			inDataBlock = true
+			continue
+		}
+		
+		if inDataBlock && trimmed == "end" {
+			break
+		}
+		
+		if inDataBlock && trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			parts := strings.SplitN(trimmed, " ", 2)
+			if len(parts) >= 2 {
+				key := parts[0]
+				value := strings.Trim(parts[1], "\"'")
+				
+				switch key {
+				case "src-type":
+					srcType = strings.TrimSpace(value)
+				case "src-url":
+					srcURL = strings.TrimSpace(value)
+				case "src-ref":
+					srcRef = strings.TrimSpace(value)
+				}
+			}
+		}
+	}
+	
+	if srcType == "" || srcURL == "" {
+		return "", "", "", fmt.Errorf("missing required src-type or src-url fields")
+	}
+	
+	if srcRef == "" {
+		srcRef = "HEAD" // Default reference
+	}
+	
+	return srcType, srcURL, srcRef, nil
+}
+
+// getGitRefCommit gets the commit hash for a specific reference
+func getGitRefCommit(repoURL, ref string) (string, error) {
+	cmd := exec.Command("git", "ls-remote", repoURL, ref)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get git commit for ref %s: %v", ref, err)
+	}
+	
+	// Parse the output to get the commit hash
+	parts := strings.Fields(string(output))
+	if len(parts) > 0 {
+		return parts[0][:8], nil // Return short commit hash (8 chars)
+	}
+	
+	return "", fmt.Errorf("no commit hash found for ref %s", ref)
 }
 
 // getGitHeadCommit gets the HEAD commit hash from a git repository
@@ -1163,7 +1451,7 @@ func removeCSHA256Field(content []byte) ([]byte, error) {
 	return []byte(strings.Join(filteredLines, "\n")), nil
 }
 
-// executeUninstallScript runs the universal uninstaller with the package's lock file
+// executeUninstallScript calls the recipe's uninstall function directly
 func executeUninstallScript(packageName string) error {
 	// Check if lock file exists
 	lockFilePath, err := getLockFilePath(packageName)
@@ -1175,44 +1463,39 @@ func executeUninstallScript(packageName string) error {
 		return fmt.Errorf("package %s is not installed (no lock file found)", packageName)
 	}
 	
-	// Create temporary directory for uninstall script
+	// Read lock file to get original recipe URL
+	lockData, err := parseLockFile(lockFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to parse lock file: %v", err)
+	}
+	
+	// Create temporary directory for uninstall
 	tempDir, err := os.MkdirTemp("", "pack-uninstall-"+packageName)
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 	
-	// Read lock file content and create a combined uninstaller script
-	lockContent, err := os.ReadFile(lockFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to read lock file: %v", err)
-	}
+	// Download the original recipe
+	scriptPath := filepath.Join(tempDir, packageName+".box")
+	originalRepo := lockData["repo"]
 	
-	// Create combined uninstaller script with embedded lock data
-	combinedScript := string(lockContent) + `
-[fn uninstall]
-  echo "uninstalling ${lock.package}..."
-  
-  echo "removing symlink at: ${lock.symlink_path}"
-  delete ${lock.symlink_path}
-  echo "removed ${lock.package} symlink"
-  
-  echo "removing store directory: ${lock.store_path}"
-  delete ${lock.store_path}
-  echo "removed ${lock.package} store files"
-  
-  echo "config directory ${lock.config_dir} will be preserved (remove manually if desired)"
-  echo "${lock.package} uninstallation complete!"
-end
-
-[main]
-  uninstall
-end
-`
-	
-	uninstallScriptPath := filepath.Join(tempDir, "uninstall.box")
-	if err := os.WriteFile(uninstallScriptPath, []byte(combinedScript), 0644); err != nil {
-		return fmt.Errorf("failed to create combined uninstall script: %v", err)
+	if originalRepo == "local" {
+		// Use local source
+		localRepoPath, err := getLocalRepoPath()
+		if err != nil {
+			return fmt.Errorf("failed to get local repo path: %v", err)
+		}
+		localPackagePath := filepath.Join(localRepoPath, packageName+".box")
+		if err := copyFile(localPackagePath, scriptPath); err != nil {
+			return fmt.Errorf("failed to copy from local source: %v", err)
+		}
+	} else {
+		// Use remote source
+		scriptURL := fmt.Sprintf("%s/raw/main/%s.box", originalRepo, packageName)
+		if err := downloadFile(scriptURL, scriptPath); err != nil {
+			return fmt.Errorf("failed to download recipe: %v", err)
+		}
 	}
 	
 	// Find box executable
@@ -1221,16 +1504,16 @@ end
 		return fmt.Errorf("box executable not found: %v", err)
 	}
 	
-	// Execute uninstall script
-	execCmd := exec.Command(boxPath, uninstallScriptPath)
+	// Execute recipe with uninstall verb
+	execCmd := exec.Command(boxPath, scriptPath, "uninstall")
 	execCmd.Stdout = os.Stdout
 	execCmd.Stderr = os.Stderr
 	execCmd.Stdin = os.Stdin
-	execCmd.Dir = tempDir // Set working directory so import can find package.lock
+	execCmd.Dir = tempDir
 	
 	err = execCmd.Run()
 	if err != nil {
-		return err
+		return fmt.Errorf("uninstall failed: %v", err)
 	}
 	
 	// Remove lock file after successful uninstall
@@ -1245,7 +1528,7 @@ end
 }
 
 // listPackages displays all installed packages with their version information
-func listPackages(cmd *cobra.Command, args []string) {
+func listPackages(args []string) {
 	if len(args) > 0 && args[0] == "help" {
 		showListHelp()
 		return
@@ -1290,11 +1573,11 @@ func listPackages(cmd *cobra.Command, args []string) {
 		}
 
 		// Format the display
-		version := lockData["source_version"]
+		version := lockData["src_ref_used"]
 		if len(version) > 12 {
 			version = version[:12]
 		}
-		source := lockData["source"]
+		source := lockData["src_url"]
 		if len(source) > 30 {
 			source = source[:27] + "..."
 		}
@@ -1311,7 +1594,7 @@ func listPackages(cmd *cobra.Command, args []string) {
 }
 
 // updatePackages scans for updates and installs them with confirmation
-func updatePackages(cmd *cobra.Command, args []string) {
+func updatePackages(args []string) {
 	if len(args) > 0 && args[0] == "help" {
 		showUpdateHelp()
 		return
@@ -1447,7 +1730,29 @@ func parseLockFile(lockFilePath string) (map[string]string, error) {
 		if inDataBlock && trimmed != "" && !strings.HasPrefix(trimmed, "#") {
 			parts := strings.SplitN(trimmed, " ", 2)
 			if len(parts) >= 2 {
-				lockData[parts[0]] = strings.TrimSpace(parts[1])
+				key := parts[0]
+				value := strings.TrimSpace(parts[1])
+				lockData[key] = value
+				
+				// Handle legacy field name mapping for backward compatibility
+				switch key {
+				case "source":
+					if _, exists := lockData["src_url"]; !exists {
+						lockData["src_url"] = value
+					}
+				case "source_type":
+					if _, exists := lockData["src_type"]; !exists {
+						lockData["src_type"] = value
+					}
+				case "source_version":
+					if _, exists := lockData["src_ref_used"]; !exists {
+						lockData["src_ref_used"] = value
+					}
+				case "sha256":
+					if _, exists := lockData["recipe_sha256"]; !exists {
+						lockData["recipe_sha256"] = value
+					}
+				}
 			}
 		}
 	}
@@ -1459,7 +1764,7 @@ func parseLockFile(lockFilePath string) (map[string]string, error) {
 func checkPackageForUpdate(packageName string, lockData map[string]string) (PackageUpdate, bool, error) {
 	update := PackageUpdate{
 		PackageName:    packageName,
-		CurrentVersion: lockData["source_version"],
+		CurrentVersion: lockData["src_ref_used"],
 	}
 
 	var updateReasons []string
@@ -1469,17 +1774,17 @@ func checkPackageForUpdate(packageName string, lockData map[string]string) (Pack
 	if recipeURL != "" && recipeURL != "local" {
 		// Download current recipe and compare hash
 		currentRecipeVersion, err := getCurrentRecipeVersion(recipeURL)
-		if err == nil && currentRecipeVersion != lockData["recipe_version"] {
+		if err == nil && currentRecipeVersion != lockData["recipe_sha256"] {
 			updateReasons = append(updateReasons, "recipe updated")
 		}
 	}
 
 	// Check source for updates
-	sourceURL := lockData["source"]
-	sourceType := lockData["source_type"]
+	sourceURL := lockData["src_url"]
+	sourceType := lockData["src_type"]
 	if sourceURL != "" && sourceURL != "unknown" {
 		newSourceVersion, err := getCurrentSourceVersion(sourceURL, sourceType)
-		if err == nil && newSourceVersion != lockData["source_version"] {
+		if err == nil && newSourceVersion != lockData["src_ref_used"] {
 			updateReasons = append(updateReasons, "source updated")
 			update.NewVersion = newSourceVersion
 		}
@@ -1497,7 +1802,7 @@ func checkPackageForUpdate(packageName string, lockData map[string]string) (Pack
 	return update, true, nil
 }
 
-// getCurrentRecipeVersion downloads a recipe and calculates its version hash
+// getCurrentRecipeVersion downloads a recipe with ETag caching and calculates its version hash
 func getCurrentRecipeVersion(recipeURL string) (string, error) {
 	// Create temp file to download recipe
 	tempFile, err := os.CreateTemp("", "recipe-*.box")
@@ -1507,8 +1812,8 @@ func getCurrentRecipeVersion(recipeURL string) (string, error) {
 	defer os.Remove(tempFile.Name())
 	defer tempFile.Close()
 
-	// Download recipe
-	if err := downloadFile(recipeURL, tempFile.Name()); err != nil {
+	// Download recipe with ETag caching enabled
+	if err := downloadFileWithCache(recipeURL, tempFile.Name(), true); err != nil {
 		return "", err
 	}
 
@@ -1598,7 +1903,7 @@ func updatePackageFromOriginalSource(packageName string) error {
 
 	// Verify recipe integrity
 	fmt.Println("Verifying recipe integrity...")
-	if err := verifyRecipeIntegrity(scriptPath); err != nil {
+	if err := verifyRecipeIntegrity(scriptPath, originalRepo); err != nil {
 		fmt.Printf("⚠️  Warning: %v\n", err)
 		fmt.Print("Continue anyway? [y/N]: ")
 		reader := bufio.NewReader(os.Stdin)
@@ -1641,19 +1946,19 @@ func updatePackageFromOriginalSource(packageName string) error {
 	// Create or update lock file after successful installation
 	fmt.Println("updating lockfile...")
 	
-	// Extract source URL from recipe
-	recipeSourceURL, err := extractRecipeURL(scriptPath)
+	// Extract source information from canonical schema
+	sourceType, recipeSourceURL, sourceRef, sourceVersion, err := detectSourceTypeAndVersion(scriptPath)
 	if err != nil {
-		fmt.Printf("Warning: failed to extract source URL: %v\n", err)
-		recipeSourceURL = "unknown"
-	}
-	
-	// Detect source type and get version information
-	sourceType, sourceVersion, err := detectSourceTypeAndVersion(recipeSourceURL)
-	if err != nil {
-		fmt.Printf("warning: failed to detect source type: %v\n", err)
+		fmt.Printf("warning: failed to extract source info: %v\n", err)
+		// Fall back to legacy extraction
+		recipeSourceURL, err = extractRecipeURL(scriptPath)
+		if err != nil {
+			fmt.Printf("warning: failed to extract source URL: %v\n", err)
+			recipeSourceURL = "unknown"
+		}
 		sourceType = "unknown"
 		sourceVersion = "unknown"
+		sourceRef = "unknown"
 	}
 	
 	// Calculate recipe version (content hash)
@@ -1680,7 +1985,7 @@ func updatePackageFromOriginalSource(packageName string) error {
 	// Get repo name from selected source
 	repoName := selectedSource.Name
 	
-	if err := createLockFile(packageName, repoName, recipeSourceURL, sourceType, sourceVersion, recipeVersion, recipeURL, recipeSHA256); err != nil {
+	if err := createLockFile(packageName, repoName, recipeSourceURL, sourceType, sourceRef, sourceVersion, recipeVersion, recipeURL, recipeSHA256); err != nil {
 		fmt.Printf("warning: failed to update lock file: %v\n", err)
 	} else {
 		fmt.Println("✓ lockfile updated")
@@ -1690,7 +1995,7 @@ func updatePackageFromOriginalSource(packageName string) error {
 }
 
 // showHelp displays general help information
-func showHelp(cmd *cobra.Command, args []string) {
+func showHelp() {
 	fmt.Println("pack - a package manager using boxlang")
 	fmt.Println()
 	fmt.Println("USAGE:")
