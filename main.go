@@ -1823,8 +1823,8 @@ func getCurrentRecipeVersion(recipeURL string) (string, error) {
 	defer os.Remove(tempFile.Name())
 	defer tempFile.Close()
 
-	// Download recipe with ETag caching enabled
-	if err := downloadFileWithCache(recipeURL, tempFile.Name(), true); err != nil {
+	// Download recipe without ETag caching for update checks
+	if err := downloadFileWithCache(recipeURL, tempFile.Name(), false); err != nil {
 		return "", err
 	}
 
