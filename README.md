@@ -12,7 +12,8 @@ cd pack
 go build -o pack main.go
 
 # put it somewhere useful
-./pack install pack
+./pack open pack
+pack update
 
 
 ```
