@@ -1,16 +1,16 @@
 # pack
 your new least favorite package manager
 
-pack is free software, released under the terms of the
+pack is free software, provided to you at no charge under the terms of the
 gnu general public license, version 3 or (at your option) any later version.
 this software is provided without any warranty.
 
 copyright © 2025 shrub industries
 
-
-pack is a simple package manager that uses box scripts for installation. it's designed to be straightforward - no complex dependency trees, no version hell, just packages that know how to install themselves.
+pack is a simple package manager that uses box scripts for installation. it's designed to be straightforward; no complex dependency trees, no version hell, simply packages that know how to install themselves based on a readable, auditable script. its easy to make your own pack repositories to distribute your own software too.
 
 ## install
+pack is easy and fun to install. try it:
 
 ```bash
 # clone and build
@@ -79,6 +79,7 @@ pack add-source https://github.com/yourname/your-pack-repo
 cat ~/.pack/config/sources.box
 ```
 and you can make your own repos to host your own packages.
+alternatively, you can provide .box files and copy them into your `~/.pack/local`
 ## writing packages
 
 create a `.box` file that defines how to build and install your software:
