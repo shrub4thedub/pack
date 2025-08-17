@@ -48,6 +48,11 @@ type Config struct {
 	Sources []string
 }
 
+type Source struct {
+	URL string
+	Name string
+}
+
 func main() {
 	// Ensure pack directory structure exists
 	if err := ensurePackDirExists(); err != nil {
@@ -921,6 +926,23 @@ func bootstrapBoxMinimal() error {
 	fmt.Printf("add %s to your PATH if it's not already included\n", localBinDir)
 	
 	return nil
+}
+
+func getConfiguredSources() ([]Source, error) {
+	config, err := loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	
+	var sources []Source
+	for i, url := range config.Sources {
+		sources = append(sources, Source{
+			URL:  url,
+			Name: fmt.Sprintf("source-%d", i+1),
+		})
+	}
+	
+	return sources, nil
 }
 
 func loadConfig() (*Config, error) {
