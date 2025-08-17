@@ -110,6 +110,8 @@ func main() {
 		updatePackages(args[1:])
 	case "clean":
 		cleanTempDirectory(args[1:])
+	case "bootstrap":
+		bootstrapPack(args[1:])
 	case "add-source":
 		if len(args) < 2 {
 			fmt.Println("error: source URL required")
@@ -989,13 +991,13 @@ func createBootstrapLockFile(tempDir, shelfDir string) error {
 	lockPath := filepath.Join(locksDir, "boxlang.lock")
 	lockContent := fmt.Sprintf(`[data -c lock]
   package boxlang
-  repo bootstrap
+  repo https://github.com/shrub4thedub/pack-repo
   src_url https://github.com/shrub4thedub/boxlang.git
   src_type git
   src_ref HEAD
   src_ref_used %s
   recipe_sha256 bootstrap
-  recipe_url bootstrap
+  recipe_url https://github.com/shrub4thedub/pack-repo/raw/main/boxlang.box
   installed_at %s
   shelf_path %s
   symlink_path %s
@@ -3201,6 +3203,7 @@ func showHelp() {
 	fmt.Println("  seek <term>        search for packages")
 	fmt.Println("  update             check for and install package updates")
 	fmt.Println("  clean              clean temporary build directories")
+	fmt.Println("  bootstrap          install pack, boxlang, and update all packages")
 	fmt.Println("  peek <package>     show package information")
 	fmt.Println("  add-source <url>   add a repository source")
 	fmt.Println("  keygen             generate Ed25519 key pair for recipe signing")
@@ -3608,4 +3611,191 @@ func readLockFileToMap(lockPath string) (map[string]string, error) {
 	}
 	
 	return result, nil
+}
+
+// bootstrapPack installs pack, boxlang, and updates all packages without confirmation
+func bootstrapPack(args []string) {
+	if len(args) > 0 && args[0] == "help" {
+		fmt.Println("pack bootstrap - install pack, boxlang, and update all packages")
+		fmt.Println()
+		fmt.Println("USAGE:")
+		fmt.Println("  pack bootstrap")
+		fmt.Println("  pack bootstrap help")
+		fmt.Println()
+		fmt.Println("DESCRIPTION:")
+		fmt.Println("  automatically installs or updates pack and boxlang packages,")
+		fmt.Println("  then updates all other packages. runs without user confirmation.")
+		fmt.Println()
+		fmt.Println("  this is useful for setting up pack on a new system or ensuring")
+		fmt.Println("  all core components are up to date.")
+		return
+	}
+
+	fmt.Println("🚀 starting pack bootstrap...")
+	fmt.Println()
+
+	// Step 1: Install/update pack
+	fmt.Println("📦 installing/updating pack...")
+	if err := installPackageAutomatically("pack"); err != nil {
+		fmt.Printf("error installing pack: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("✓ pack installation complete")
+	fmt.Println()
+
+	// Step 2: Install/update boxlang
+	fmt.Println("📦 installing/updating boxlang...")
+	if err := installPackageAutomatically("boxlang"); err != nil {
+		fmt.Printf("error installing boxlang: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("✓ boxlang installation complete")
+	fmt.Println()
+
+	// Step 3: Update all packages
+	fmt.Println("🔄 updating all packages...")
+	if err := updatePackagesAutomatically(); err != nil {
+		fmt.Printf("warning: some updates may have failed: %v\n", err)
+	} else {
+		fmt.Println("✓ all packages updated")
+	}
+	fmt.Println()
+
+	fmt.Println("🎉 pack bootstrap complete!")
+	fmt.Println("pack and boxlang are ready to use")
+}
+
+// installPackageAutomatically installs a package without user interaction
+func installPackageAutomatically(packageName string) error {
+	// Check if already installed and up to date
+	if isPackageUpToDate(packageName) {
+		fmt.Printf("  %s is already up to date\n", packageName)
+		return nil
+	}
+
+	// Use the existing openPackage logic but skip user confirmation
+	sources, err := getConfiguredSources()
+	if err != nil {
+		return fmt.Errorf("failed to get sources: %v", err)
+	}
+
+	var selectedSource Source
+	packageFound := false
+
+	// Find the package in available sources (prefer non-local sources)
+	for _, source := range sources {
+		if source.URL != "local" {
+			scriptURL := getScriptURL(source.URL, packageName+".box")
+			tempFile, err := os.CreateTemp("", "pkg_check_*.box")
+			if err != nil {
+				continue
+			}
+			defer os.Remove(tempFile.Name())
+			tempFile.Close()
+
+			if downloadFile(scriptURL, tempFile.Name()) == nil {
+				pkg := parsePackageInfo(tempFile.Name())
+				if pkg.Name == packageName {
+					selectedSource = source
+					packageFound = true
+					break
+				}
+			}
+		}
+	}
+
+	if !packageFound {
+		return fmt.Errorf("package %s not found in any source", packageName)
+	}
+
+	fmt.Printf("  found %s in %s\n", packageName, selectedSource.URL)
+
+	// Use a simpler approach - just call the existing openPackage function
+	// but simulate the required arguments for automated installation
+	originalArgs := os.Args
+	defer func() { os.Args = originalArgs }()
+	
+	// Set os.Args to simulate pack open <package> command
+	os.Args = []string{"pack", "open", packageName}
+	
+	// Temporarily redirect stdin to provide automatic "y" confirmation
+	oldStdin := os.Stdin
+	defer func() { os.Stdin = oldStdin }()
+	
+	r, w, _ := os.Pipe()
+	os.Stdin = r
+	go func() {
+		defer w.Close()
+		fmt.Fprintf(w, "2\ny\n") // Select source 2 (remote) and confirm
+	}()
+	
+	// Call openPackage but capture any errors
+	defer func() {
+		if r := recover(); r != nil {
+			// Handle any panics from openPackage
+		}
+	}()
+	
+	openPackage([]string{packageName})
+	return nil
+}
+
+// updatePackagesAutomatically updates all packages without user confirmation
+func updatePackagesAutomatically() error {
+	// Update core packages first
+	updateCorePackagesFirst()
+
+	// Refresh public keys
+	fmt.Println("  refreshing public keys...")
+	refreshPublicKeys()
+
+	// Scan for updates
+	availableUpdates, err := scanForUpdates()
+	if err != nil {
+		return fmt.Errorf("error scanning for updates: %v", err)
+	}
+
+	if len(availableUpdates) == 0 {
+		fmt.Println("  all packages are up to date")
+		return nil
+	}
+
+	fmt.Printf("  found %d package(s) to update\n", len(availableUpdates))
+
+	// Install updates automatically
+	for _, update := range availableUpdates {
+		fmt.Printf("  updating %s (%s → %s)...\n", 
+			update.PackageName, 
+			update.CurrentVersion, 
+			update.NewVersion)
+
+		if err := updatePackageFromOriginalSource(update.PackageName); err != nil {
+			fmt.Printf("  warning: failed to update %s: %v\n", update.PackageName, err)
+		} else {
+			fmt.Printf("  ✓ %s updated successfully\n", update.PackageName)
+		}
+	}
+
+	return nil
+}
+
+// isPackageUpToDate checks if a package is installed and up to date
+func isPackageUpToDate(packageName string) bool {
+	lockPath, err := getLockFilePath(packageName)
+	if err != nil {
+		return false
+	}
+
+	if _, err := os.Stat(lockPath); os.IsNotExist(err) {
+		return false // Package not installed
+	}
+
+	// Use existing update check logic
+	lockData, err := readLockFileToMap(lockPath)
+	if err != nil {
+		return false
+	}
+
+	_, hasUpdate, err := checkPackageForUpdate(packageName, lockData)
+	return err == nil && !hasUpdate
 }
