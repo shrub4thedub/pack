@@ -1,8 +1,0 @@
-import package.lock
-
-[main]
-  echo "Available data blocks:"
-  echo "Testing package.lock access:"
-  echo "package = ${package.lock.package}"
-  echo "installed_to = ${package.lock.installed_to}"
-end

@@ -1,8 +1,0 @@
-import package
-
-[main]
-  echo "Available fields:"  
-  echo "package: ${package.lock.package}"
-  echo "version: ${package.lock.version}"
-  echo "installed_to: ${package.lock.installed_to}"
-end

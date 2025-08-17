@@ -1,5 +1,0 @@
-import package
-
-[main]
-  echo "test = ${package.lock.installed_to}"
-end
