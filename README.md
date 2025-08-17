@@ -30,20 +30,23 @@ pack update
 pack downloads `.box` scripts that contain installation instructions. these scripts use the boxlang (my fucked up scripting language) to fetch source code, build it, and install binaries. it shows you and lets you edit the script before install, so no fuckery
 
 ```bash
-# see what's available
-pack peek edith
+# check package details
+pack peek <pkg>
 
 # install something
-pack open edith
+pack open <pkg>
 
 # update everything
 pack update
 
 # remove stuff
-pack close edith
+pack close <pkg>
 
 #wtf do i do
 pack help
+
+#seriously wtf do i do
+pack <cmd> help
 ```
 
 packages are verified with ed25519 signatures and cached locally. the whole thing is designed around trust-on-first-use with repository-based key distribution.
