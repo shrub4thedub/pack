@@ -1,6 +1,13 @@
 # pack
 your new least favorite package manager
 
+pack is free software, released under the terms of the
+gnu general public license, version 3 or (at your option) any later version.
+this software is provided without any warranty.
+
+copyright © 2025 shrub industries
+
+
 pack is a simple package manager that uses box scripts for installation. it's designed to be straightforward - no complex dependency trees, no version hell, just packages that know how to install themselves.
 
 ## install
