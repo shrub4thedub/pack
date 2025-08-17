@@ -108,6 +108,8 @@ func main() {
 		seekPackages(args[1:])
 	case "update":
 		updatePackages(args[1:])
+	case "clean":
+		cleanTempDirectory(args[1:])
 	case "add-source":
 		if len(args) < 2 {
 			fmt.Println("error: source URL required")
@@ -145,6 +147,9 @@ func openPackage(args []string) {
 		fmt.Println("usage: pack open <package> [--verbose]")
 		os.Exit(1)
 	}
+	
+	// Check for pack/boxlang updates before installing any package
+	checkAndUpdateCorePackages()
 	
 	packageName := args[0]
 	verbose := false
@@ -857,8 +862,8 @@ func ensureBoxExists() error {
 func bootstrapBoxMinimal() error {
 	fmt.Println("bootstrapping box interpreter...")
 	
-	// download and build box directly
-	showProgress(1, 4, "creating temporary directory...")
+	// For bootstrapping, we'll download and build box directly
+	showProgress(1, 6, "creating temporary directory...")
 	tempDir, err := os.MkdirTemp("", "box-bootstrap-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %v", err)
@@ -866,7 +871,7 @@ func bootstrapBoxMinimal() error {
 	defer os.RemoveAll(tempDir)
 
 	// Clone boxlang repository
-	showProgress(2, 4, "cloning boxlang repository...")
+	showProgress(2, 6, "cloning boxlang repository...")
 	cloneCmd := exec.Command("git", "clone", "https://github.com/shrub4thedub/boxlang.git", tempDir)
 	cloneCmd.Stdout = nil // Suppress git output
 	cloneCmd.Stderr = nil
@@ -875,7 +880,7 @@ func bootstrapBoxMinimal() error {
 	}
 
 	// Build box
-	showProgress(3, 4, "building box interpreter...")
+	showProgress(3, 6, "building box interpreter...")
 	buildCmd := exec.Command("go", "build", "-o", "box", "cmd/box/main.go")
 	buildCmd.Dir = tempDir
 	buildCmd.Stdout = nil // Suppress build output
@@ -884,21 +889,29 @@ func bootstrapBoxMinimal() error {
 		return fmt.Errorf("failed to build box: %v", err)
 	}
 
-	// Get user's home directory and create ~/.local/bin
+	// Get user's home directory
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("failed to get home directory: %v", err)
 	}
 
+	// Create shelf and bin directories
+	showProgress(4, 6, "creating installation directories...")
+	shelfDir := filepath.Join(homeDir, ".pack", "shelf", "boxlang")
 	localBinDir := filepath.Join(homeDir, ".local", "bin")
+	
+	if err := os.MkdirAll(shelfDir, 0755); err != nil {
+		return fmt.Errorf("failed to create shelf directory: %v", err)
+	}
 	if err := os.MkdirAll(localBinDir, 0755); err != nil {
 		return fmt.Errorf("failed to create ~/.local/bin: %v", err)
 	}
 
-	// Copy box to ~/.local/bin
-	showProgress(4, 4, "installing box binary...")
+	// Install box to shelf
+	showProgress(5, 6, "installing box binary...")
 	boxSrc := filepath.Join(tempDir, "box")
-	boxDst := filepath.Join(localBinDir, "box")
+	boxDst := filepath.Join(shelfDir, "box")
+	symlinkDst := filepath.Join(localBinDir, "box")
 	
 	srcFile, err := os.Open(boxSrc)
 	if err != nil {
@@ -921,10 +934,78 @@ func bootstrapBoxMinimal() error {
 		return fmt.Errorf("failed to make box executable: %v", err)
 	}
 
+	// Create symlink
+	if err := createSymlink(boxDst, symlinkDst); err != nil {
+		return fmt.Errorf("failed to create symlink: %v", err)
+	}
+
+	// Create lock file for proper package management
+	showProgress(6, 6, "creating package lock file...")
+	if err := createBootstrapLockFile(tempDir, shelfDir); err != nil {
+		return fmt.Errorf("failed to create lock file: %v", err)
+	}
+
 	fmt.Printf("✓ box interpreter installed to %s\n", boxDst)
+	fmt.Printf("✓ symlink created at %s\n", symlinkDst)
 	fmt.Printf("add %s to your PATH if it's not already included\n", localBinDir)
 	
 	return nil
+}
+
+// createSymlink creates a symlink, removing existing one if needed
+func createSymlink(target, link string) error {
+	// Remove existing symlink if it exists
+	if _, err := os.Lstat(link); err == nil {
+		if err := os.Remove(link); err != nil {
+			return err
+		}
+	}
+	
+	return os.Symlink(target, link)
+}
+
+// createBootstrapLockFile creates a proper lock file for the bootstrapped box installation
+func createBootstrapLockFile(tempDir, shelfDir string) error {
+	// Get current commit hash from the cloned repository
+	getCommitCmd := exec.Command("git", "rev-parse", "HEAD")
+	getCommitCmd.Dir = tempDir
+	commitOutput, err := getCommitCmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to get commit hash: %v", err)
+	}
+	commitHash := strings.TrimSpace(string(commitOutput))
+
+	// Get locks directory path
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	locksDir := filepath.Join(homeDir, ".pack", "locks")
+	if err := os.MkdirAll(locksDir, 0755); err != nil {
+		return err
+	}
+
+	// Create lock file content in proper box format
+	lockPath := filepath.Join(locksDir, "boxlang.lock")
+	lockContent := fmt.Sprintf(`[data -c lock]
+  package boxlang
+  repo bootstrap
+  src_url https://github.com/shrub4thedub/boxlang.git
+  src_type git
+  src_ref HEAD
+  src_ref_used %s
+  recipe_sha256 bootstrap
+  recipe_url bootstrap
+  installed_at %s
+  shelf_path %s
+  symlink_path %s
+  config_dir %s/.config/boxlang
+  trust_state bootstrap
+end
+`, commitHash[:8], time.Now().Format("2006-01-02T15:04:05Z"), shelfDir, 
+   filepath.Join(homeDir, ".local", "bin", "box"), homeDir)
+
+	return os.WriteFile(lockPath, []byte(lockContent), 0644)
 }
 
 func getConfiguredSources() ([]Source, error) {
@@ -2691,6 +2772,9 @@ func updatePackages(args []string) {
 		return
 	}
 	
+	// Always update pack and boxlang first during pack update
+	updateCorePackagesFirst()
+	
 	// Refresh public keys from all configured sources
 	fmt.Println("Refreshing public keys...")
 	refreshPublicKeys()
@@ -3116,6 +3200,7 @@ func showHelp() {
 	fmt.Println("  list [source]      list all available packages")
 	fmt.Println("  seek <term>        search for packages")
 	fmt.Println("  update             check for and install package updates")
+	fmt.Println("  clean              clean temporary build directories")
 	fmt.Println("  peek <package>     show package information")
 	fmt.Println("  add-source <url>   add a repository source")
 	fmt.Println("  keygen             generate Ed25519 key pair for recipe signing")
@@ -3380,4 +3465,147 @@ func signFile(privateKey ed25519.PrivateKey, filePath string) error {
 	
 	fmt.Printf("Signed: %s -> %s\n", filePath, sigPath)
 	return nil
+}
+
+// cleanTempDirectory cleans the ~/.pack/tmp directory
+func cleanTempDirectory(args []string) {
+	if len(args) > 0 && args[0] == "help" {
+		fmt.Println("pack clean - clean temporary build directories")
+		fmt.Println()
+		fmt.Println("USAGE:")
+		fmt.Println("  pack clean")
+		fmt.Println("  pack clean help")
+		fmt.Println()
+		fmt.Println("DESCRIPTION:")
+		fmt.Println("  removes all temporary files and build directories")
+		fmt.Println("  from ~/.pack/tmp to free up disk space.")
+		fmt.Println()
+		fmt.Println("  this is safe to run at any time and will not")
+		fmt.Println("  affect installed packages.")
+		return
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("error getting home directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	tmpDir := filepath.Join(homeDir, packDir, "tmp")
+	
+	// Check if tmp directory exists
+	if _, err := os.Stat(tmpDir); os.IsNotExist(err) {
+		fmt.Println("temporary directory is already clean")
+		return
+	}
+
+	fmt.Printf("cleaning temporary directory: %s\n", tmpDir)
+	
+	// Remove everything in the tmp directory
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		fmt.Printf("error reading tmp directory: %v\n", err)
+		os.Exit(1)
+	}
+	
+	removedCount := 0
+	for _, entry := range entries {
+		entryPath := filepath.Join(tmpDir, entry.Name())
+		if err := os.RemoveAll(entryPath); err != nil {
+			fmt.Printf("warning: failed to remove %s: %v\n", entryPath, err)
+		} else {
+			removedCount++
+		}
+	}
+	
+	fmt.Printf("✓ cleaned %d items from temporary directory\n", removedCount)
+}
+
+// checkAndUpdateCorePackages silently checks and updates pack/boxlang before package installation
+func checkAndUpdateCorePackages() {
+	corePackages := []string{"pack", "boxlang"}
+	
+	for _, packageName := range corePackages {
+		if hasUpdate, err := checkCorePackageForUpdate(packageName); err == nil && hasUpdate {
+			fmt.Printf("🔄 updating %s...\n", packageName)
+			if err := updatePackageFromOriginalSource(packageName); err != nil {
+				fmt.Printf("warning: failed to auto-update %s: %v\n", packageName, err)
+			} else {
+				fmt.Printf("✓ %s updated successfully\n", packageName)
+			}
+		}
+	}
+}
+
+// updateCorePackagesFirst prioritizes pack and boxlang updates during pack update
+func updateCorePackagesFirst() {
+	fmt.Println("checking for core package updates...")
+	
+	corePackages := []string{"pack", "boxlang"}
+	coreUpdatesNeeded := false
+	
+	for _, packageName := range corePackages {
+		if hasUpdate, err := checkCorePackageForUpdate(packageName); err == nil && hasUpdate {
+			coreUpdatesNeeded = true
+			fmt.Printf("🔄 updating %s...\n", packageName)
+			if err := updatePackageFromOriginalSource(packageName); err != nil {
+				fmt.Printf("error updating %s: %v\n", packageName, err)
+			} else {
+				fmt.Printf("✓ %s updated successfully\n", packageName)
+			}
+		}
+	}
+	
+	if coreUpdatesNeeded {
+		fmt.Println("core package updates complete, continuing with other packages...")
+	}
+}
+
+// checkCorePackageForUpdate checks if a core package (pack/boxlang) has updates available
+func checkCorePackageForUpdate(packageName string) (bool, error) {
+	lockPath, err := getLockFilePath(packageName)
+	if err != nil {
+		return false, err
+	}
+	
+	if _, err := os.Stat(lockPath); os.IsNotExist(err) {
+		return false, nil // Package not installed
+	}
+	
+	// Read lock file to get current info
+	lockData, err := readLockFileToMap(lockPath)
+	if err != nil {
+		return false, err
+	}
+	
+	// Use existing update checking logic
+	_, hasUpdate, err := checkPackageForUpdate(packageName, lockData)
+	return hasUpdate, err
+}
+
+// readLockFileToMap reads a lock file and returns it as a map
+func readLockFileToMap(lockPath string) (map[string]string, error) {
+	content, err := os.ReadFile(lockPath)
+	if err != nil {
+		return nil, err
+	}
+	
+	result := make(map[string]string)
+	lines := strings.Split(string(content), "\n")
+	
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			value := strings.TrimSpace(parts[1])
+			result[key] = value
+		}
+	}
+	
+	return result, nil
 }
