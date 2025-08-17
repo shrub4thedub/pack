@@ -9,6 +9,8 @@ copyright © 2025 shrub industries
 
 pack is a simple package manager that uses box scripts for installation. it's designed to be straightforward; no complex dependency trees, no version hell, simply packages that know how to install themselves based on a readable, auditable script. its easy to make your own pack repositories to distribute your own software too.
 
+pack features automatic ed25519 signature verification, repository-based key management with automatic rotation, and zero-touch security updates. all packages are verified before installation and keys are automatically cached and managed.
+
 ## install
 pack is easy and fun to install. try it:
 
@@ -42,6 +44,15 @@ pack update
 # remove stuff
 pack close <pkg>
 
+# see what's installed
+pack shelf
+
+# see all available packages
+pack list
+
+# search for packages
+pack seek <term>
+
 #wtf do i do
 pack help
 
@@ -57,7 +68,7 @@ pack keeps everything organized in `~/.pack/`:
 
 ```
 ~/.pack/
-├── store/          # actual binaries live here
+├── shelf/          # actual binaries live here
 │   ├── edith/
 │   ├── vim/
 │   └── pack/
@@ -68,7 +79,7 @@ pack keeps everything organized in `~/.pack/`:
 └── tmp/            # build workspace
 ```
 
-when you install something, the binary goes in `store/packagename/` and gets symlinked to `~/.local/bin/`. this way you can cleanly remove packages without hunting down scattered files.
+when you install something, the binary goes in `shelf/packagename/` and gets symlinked to `~/.local/bin/`. this way you can cleanly remove packages without hunting down scattered files.
 
 ## adding sources
 
@@ -111,19 +122,19 @@ end
 [fn install]
   env HOME
   set home ${_env_result}
-  set store_dir "${home}/.pack/store/myapp"
+  set shelf_dir "${home}/.pack/shelf/myapp"
   set bin_dir "${home}/.local/bin"
   
   # create directories
-  mkdir ${store_dir}
+  mkdir ${shelf_dir}
   mkdir ${bin_dir}
   
-  # install to pack store
-  run cp myapp ${store_dir}/myapp
-  run chmod +x ${store_dir}/myapp
+  # install to pack shelf
+  run cp myapp ${shelf_dir}/myapp
+  run chmod +x ${shelf_dir}/myapp
   
   # create symlink in bin directory
-  run ln -sf ${store_dir}/myapp ${bin_dir}/myapp
+  run ln -sf ${shelf_dir}/myapp ${bin_dir}/myapp
 end
 
 [main]
@@ -133,7 +144,7 @@ end
 end
 ```
 
-sign it and put it in your repository with the public key in `keys/pack.pub`.
+sign it and put it in your repository with the public key in `keys/pack.box`.
 
 that's pretty much it.
 

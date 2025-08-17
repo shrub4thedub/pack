@@ -90,8 +90,17 @@ func main() {
 			os.Exit(1)
 		}
 		peekPackage(args[1:])
+	case "shelf":
+		listInstalledPackages(args[1:])
 	case "list":
-		listPackages(args[1:])
+		listAllPackages(args[1:])
+	case "seek":
+		if len(args) < 2 {
+			fmt.Println("error: search term required")
+			fmt.Println("usage: pack seek <search_term>")
+			os.Exit(1)
+		}
+		seekPackages(args[1:])
 	case "update":
 		updatePackages(args[1:])
 	case "add-source":
@@ -713,14 +722,14 @@ func getLocalRepoPath() (string, error) {
 	return localPath, nil
 }
 
-func getStorePath() (string, error) {
+func getShelfPath() (string, error) {
 	packPath, err := getPackDir()
 	if err != nil {
 		return "", err
 	}
 	
-	storePath := filepath.Join(packPath, "store")
-	return storePath, nil
+	shelfPath := filepath.Join(packPath, "shelf")
+	return shelfPath, nil
 }
 
 func ensurePackDirExists() error {
@@ -735,7 +744,7 @@ func ensurePackDirExists() error {
 	}
 	
 	// Create subdirectories
-	subdirs := []string{"locks", "config", "tmp", "local", "store", "cache"}
+	subdirs := []string{"locks", "config", "tmp", "local", "shelf", "cache"}
 	for _, subdir := range subdirs {
 		subdirPath := filepath.Join(packPath, subdir)
 		if err := os.MkdirAll(subdirPath, 0755); err != nil {
@@ -1978,12 +1987,12 @@ func createLockFile(packageName, repo, sourceURL, sourceType, sourceRef, sourceV
 		return err
 	}
 	
-	// Get store and symlink paths
-	storePath, err := getStorePath()
+	// Get shelf and symlink paths
+	shelfPath, err := getShelfPath()
 	if err != nil {
 		return err
 	}
-	packageStorePath := filepath.Join(storePath, packageName)
+	packageShelfPath := filepath.Join(shelfPath, packageName)
 	
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -2006,12 +2015,12 @@ func createLockFile(packageName, repo, sourceURL, sourceType, sourceRef, sourceV
   recipe_sha256 %s
   recipe_url %s
   installed_at %s
-  store_path %s
+  shelf_path %s
   symlink_path %s
   config_dir %s
   trust_state %s
 end
-`, packageName, repo, sourceURL, sourceType, sourceRef, sourceVersion, recipeVersion, recipeURL, time.Now().UTC().Format(time.RFC3339), packageStorePath, symlinkPath, configDir, trustState)
+`, packageName, repo, sourceURL, sourceType, sourceRef, sourceVersion, recipeVersion, recipeURL, time.Now().UTC().Format(time.RFC3339), packageShelfPath, symlinkPath, configDir, trustState)
 	
 	return os.WriteFile(lockFilePath, []byte(lockContent), 0644)
 }
@@ -2389,7 +2398,7 @@ func executeUninstallScript(packageName string) error {
 }
 
 // listPackages displays all installed packages with their version information
-func listPackages(args []string) {
+func listInstalledPackages(args []string) {
 	if len(args) > 0 && args[0] == "help" {
 		showListHelp()
 		return
@@ -2452,6 +2461,206 @@ func listPackages(args []string) {
 
 		fmt.Printf("%-15s %-12s %-30s %s\n", packageName, version, source, installDate)
 	}
+}
+
+// listAllPackages displays all packages available in configured repositories
+func listAllPackages(args []string) {
+	if len(args) > 0 && args[0] == "help" {
+		fmt.Println("Usage: pack list [source]")
+		fmt.Println("Lists all packages available in configured repositories")
+		fmt.Println("Optional: specify source index (1, 2, etc.) to list from specific repository")
+		return
+	}
+	
+	sources, err := getConfiguredSources()
+	if err != nil {
+		fmt.Printf("error getting sources: %v\n", err)
+		os.Exit(1)
+	}
+	
+	if len(sources) == 0 {
+		fmt.Println("no package sources configured")
+		fmt.Println("use 'pack add-source <url>' to add a repository")
+		return
+	}
+	
+	// If source specified, list only that source
+	if len(args) > 0 {
+		sourceIndex, err := strconv.Atoi(args[0])
+		if err != nil || sourceIndex < 1 || sourceIndex > len(sources) {
+			fmt.Printf("invalid source index: %s\n", args[0])
+			fmt.Println("available sources:")
+			for i, source := range sources {
+				fmt.Printf("  %d) %s\n", i+1, source.Name)
+			}
+			return
+		}
+		
+		fmt.Printf("Packages from %s:\n", sources[sourceIndex-1].Name)
+		listPackagesFromSource(sources[sourceIndex-1])
+		return
+	}
+	
+	// List packages from all sources
+	for i, source := range sources {
+		fmt.Printf("\n%d) %s:\n", i+1, source.Name)
+		listPackagesFromSource(source)
+	}
+}
+
+// seekPackages searches for packages by name or description
+func seekPackages(args []string) {
+	if len(args) == 0 {
+		fmt.Println("error: search term required")
+		fmt.Println("usage: pack seek <search_term>")
+		return
+	}
+	
+	searchTerm := strings.ToLower(strings.Join(args, " "))
+	
+	sources, err := getConfiguredSources()
+	if err != nil {
+		fmt.Printf("error getting sources: %v\n", err)
+		os.Exit(1)
+	}
+	
+	if len(sources) == 0 {
+		fmt.Println("no package sources configured")
+		return
+	}
+	
+	fmt.Printf("Searching for '%s'...\n\n", searchTerm)
+	foundAny := false
+	
+	for _, source := range sources {
+		packages := getPackagesFromSource(source)
+		found := false
+		
+		for _, pkg := range packages {
+			// Search in name and description
+			if strings.Contains(strings.ToLower(pkg.Name), searchTerm) ||
+			   strings.Contains(strings.ToLower(pkg.Description), searchTerm) {
+				if !found {
+					fmt.Printf("From %s:\n", source.Name)
+					found = true
+					foundAny = true
+				}
+				fmt.Printf("  %-15s - %s\n", pkg.Name, pkg.Description)
+			}
+		}
+		if found {
+			fmt.Println()
+		}
+	}
+	
+	if !foundAny {
+		fmt.Printf("No packages found matching '%s'\n", searchTerm)
+		fmt.Println("Try 'pack list' to see all available packages")
+	}
+}
+
+// PackageInfo represents basic package information
+type PackageInfo struct {
+	Name        string
+	Description string
+	Version     string
+	License     string
+}
+
+// listPackagesFromSource lists packages from a specific source
+func listPackagesFromSource(source Source) {
+	packages := getPackagesFromSource(source)
+	
+	if len(packages) == 0 {
+		fmt.Println("  no packages available")
+		return
+	}
+	
+	fmt.Printf("  %-15s %-50s %s\n", "name", "description", "license")
+	fmt.Printf("  %-15s %-50s %s\n", "----", "-----------", "-------")
+	
+	for _, pkg := range packages {
+		desc := pkg.Description
+		if len(desc) > 50 {
+			desc = desc[:47] + "..."
+		}
+		fmt.Printf("  %-15s %-50s %s\n", pkg.Name, desc, pkg.License)
+	}
+}
+
+// getPackagesFromSource fetches and parses package information from a source
+func getPackagesFromSource(source Source) []PackageInfo {
+	var packages []PackageInfo
+	
+	// For now, this is a simplified implementation
+	// In a real implementation, you might fetch a package index or scan the repository
+	
+	// Try to list common package files by attempting downloads
+	commonPackages := []string{"edith", "pack", "boxlang", "vim", "btop", "crystal-orb", "pfetch"}
+	
+	for _, pkgName := range commonPackages {
+		scriptURL := getScriptURL(source.Name, pkgName+".box")
+		
+		// Try to download the package file to check if it exists
+		tempFile, err := os.CreateTemp("", "pkg_check_*.box")
+		if err != nil {
+			continue
+		}
+		defer os.Remove(tempFile.Name())
+		tempFile.Close()
+		
+		if downloadFile(scriptURL, tempFile.Name()) == nil {
+			// Parse package info from the downloaded file
+			if pkg := parsePackageInfo(tempFile.Name()); pkg.Name != "" {
+				packages = append(packages, pkg)
+			}
+		}
+	}
+	
+	return packages
+}
+
+// parsePackageInfo extracts package information from a .box file
+func parsePackageInfo(filePath string) PackageInfo {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return PackageInfo{}
+	}
+	
+	// Simple parsing of the data block
+	lines := strings.Split(string(content), "\n")
+	inDataBlock := false
+	pkg := PackageInfo{}
+	
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		
+		if strings.HasPrefix(line, "[data -c pkg]") {
+			inDataBlock = true
+			continue
+		} else if line == "end" {
+			inDataBlock = false
+			continue
+		}
+		
+		if inDataBlock && strings.Contains(line, " ") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				switch parts[0] {
+				case "name":
+					pkg.Name = parts[1]
+				case "desc":
+					pkg.Description = strings.Join(parts[1:], " ")
+				case "ver":
+					pkg.Version = parts[1]
+				case "license":
+					pkg.License = parts[1]
+				}
+			}
+		}
+	}
+	
+	return pkg
 }
 
 // updatePackages scans for updates and installs them with confirmation
@@ -2882,7 +3091,9 @@ func showHelp() {
 	fmt.Println("COMMANDS:")
 	fmt.Println("  open <package>     install a package")
 	fmt.Println("  close <package>    uninstall a package")
-	fmt.Println("  list               list installed packages")
+	fmt.Println("  shelf              list installed packages")
+	fmt.Println("  list [source]      list all available packages")
+	fmt.Println("  seek <term>        search for packages")
 	fmt.Println("  update             check for and install package updates")
 	fmt.Println("  peek <package>     show package information")
 	fmt.Println("  add-source <url>   add a repository source")
