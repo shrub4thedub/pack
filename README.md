@@ -7,7 +7,7 @@ this software is provided without any warranty.
 
 copyright © 2025 shrub industries
 
-pack is a simple package manager that uses box scripts for installation. it's designed to be straightforward; no complex dependency trees, no version hell, simply packages that know how to install themselves based on a readable, auditable script. its easy to make your own pack repositories to distribute your own software too.
+pack is a simple package manager that uses [box](https://github.com/shrub4thedub/boxlang) scripts for installation. it's designed to be straightforward; no complex dependency trees, no version hell, simply packages that know how to install themselves based on a readable, auditable script. its easy to make your own pack repositories to distribute your own software too.
 
 pack features automatic ed25519 signature verification, repository-based key management with automatic rotation, and zero-touch security updates. all packages are verified before installation and keys are automatically cached and managed.
 
