@@ -20,10 +20,8 @@ git clone https://github.com/shrub4thedub/pack.git
 cd pack
 go build -o pack main.go
 
-# put it somewhere useful
-./pack open pack
-pack update
-
+# put everything in it's right place
+./pack bootstrap
 
 ```
 
