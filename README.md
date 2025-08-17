@@ -5,7 +5,7 @@ pack is free software, provided to you at no charge under the terms of the
 gnu general public license, version 3 or (at your option) any later version.
 this software is provided without any warranty.
 
-copyright © 2025 shrub industries
+copyright © 2025 shrub industries.
 
 pack is a simple package manager that uses [box](https://github.com/shrub4thedub/boxlang) scripts for installation. it's designed to be straightforward; no complex dependency trees, no version hell, simply packages that know how to install themselves based on a readable, auditable script. its easy to make your own pack repositories to distribute your own software too.
 
