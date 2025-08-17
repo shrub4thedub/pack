@@ -54,13 +54,13 @@ type Source struct {
 }
 
 func main() {
-	// Ensure pack directory structure exists
+	// check pack directory structure exists cuz we need that shit
 	if err := ensurePackDirExists(); err != nil {
 		fmt.Printf("failed to create pack directory: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Bootstrap box interpreter if missing
+	// bootstrap box interpreter if missing cuz we need that shit too
 	if err := ensureBoxExists(); err != nil {
 		fmt.Printf("failed to bootstrap box interpreter: %v\n", err)
 		os.Exit(1)
@@ -197,7 +197,7 @@ func addSource(args []string) {
 	
 	sourceURL := args[0]
 	
-	// Try to fetch public key from the repository
+	// Try to fetch public key from the repository cuz we dont play about security
 	fmt.Printf("Fetching public key for %s...\n", sourceURL)
 	pubkey, err := fetchPublicKeyFromRepo(sourceURL)
 	if err != nil {
@@ -254,7 +254,7 @@ func executePackageScript(packageName string, uninstall bool, verbose ...bool) e
 		return fmt.Errorf("failed to download script: %v", err)
 	}
 
-	// Verify recipe integrity
+	// verify recipe integrity
 	fmt.Println("verifying recipe integrity...")
 	if err := verifyRecipeIntegrity(scriptPath, selectedSource.Name); err != nil {
 		fmt.Printf("⚠️  warning: %v\n", err)
@@ -282,11 +282,11 @@ func executePackageScript(packageName string, uninstall bool, verbose ...bool) e
 		return fmt.Errorf("box executable not found: %v", err)
 	}
 
-	// Always show normal output for installs (no progress bar unless verbose flag used)
+	
 	cmdArgs := []string{scriptPath}
 	execCmd := exec.Command(boxPath, cmdArgs...)
 	
-	// Set working directory to the temp directory to contain build debris
+	// Set working directory to the temp directory to contain build debris because random source trees are fucking annoying right
 	execCmd.Dir = tempDir
 	
 	if isVerbose {
@@ -307,7 +307,7 @@ func executePackageScript(packageName string, uninstall bool, verbose ...bool) e
 	fmt.Println("✓ installation complete")
 	fmt.Println("creating lock file...")
 	
-	// Extract source information from canonical schema
+	// Extract source information based on the standard 
 	sourceType, recipeSourceURL, sourceRef, sourceVersion, err := detectSourceTypeAndVersion(scriptPath)
 	if err != nil {
 		fmt.Printf("warning: failed to extract source info: %v\n", err)
@@ -683,7 +683,7 @@ func parseAndDisplayPackageInfo(scriptPath, packageName string) error {
 		fmt.Printf("license: %s\n", license)
 	}
 
-	// Display any other fields not in the canonical schema
+	// Display any other field
 	canonicalFields := map[string]bool{
 		"name": true, "desc": true, "ver": true, "src-type": true,
 		"src-url": true, "src-ref": true, "bin": true, "license": true,
@@ -748,7 +748,7 @@ func ensurePackDirExists() error {
 		return err
 	}
 	
-	// Create subdirectories
+	// Create subdirectories (future shrub dont change these its a fucking pain)
 	subdirs := []string{"locks", "config", "tmp", "local", "shelf", "cache"}
 	for _, subdir := range subdirs {
 		subdirPath := filepath.Join(packPath, subdir)
@@ -799,7 +799,7 @@ end`
 	return os.WriteFile(configFile, []byte(defaultConfig), 0644)
 }
 
-// Simple progress bar for updates
+// Simple stoopid simple progress bar for updates
 func showProgress(current, total int, message string) {
 	percent := float64(current) / float64(total) * 100
 	barWidth := 30
@@ -848,7 +848,6 @@ func ensureBoxExists() error {
 		return nil // box exists in ~/.local/bin
 	}
 
-	// Bootstrap box by installing it via pack
 	fmt.Println("installing box interpreter...")
 	
 	// Create a minimal box bootstrap without using box itself
@@ -858,7 +857,7 @@ func ensureBoxExists() error {
 func bootstrapBoxMinimal() error {
 	fmt.Println("bootstrapping box interpreter...")
 	
-	// For bootstrapping, we'll download and build box directly
+	// download and build box directly
 	showProgress(1, 4, "creating temporary directory...")
 	tempDir, err := os.MkdirTemp("", "box-bootstrap-*")
 	if err != nil {
