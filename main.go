@@ -2621,7 +2621,7 @@ func getPackagesFromSource(source Source) []PackageInfo {
 	commonPackages := []string{"edith", "pack", "boxlang", "vim", "btop", "crystal-orb", "pfetch"}
 	
 	for _, pkgName := range commonPackages {
-		scriptURL := getScriptURL(source.Name, pkgName+".box")
+		scriptURL := getScriptURL(source.URL, pkgName+".box")
 		
 		// Try to download the package file to check if it exists
 		tempFile, err := os.CreateTemp("", "pkg_check_*.box")
