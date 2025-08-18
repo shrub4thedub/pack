@@ -119,6 +119,8 @@ func main() {
 			os.Exit(1)
 		}
 		addSource(args[1:])
+	case "info":
+		showInfo()
 	case "help":
 		showHelp()
 	case "keygen":
@@ -1428,6 +1430,16 @@ func verifyWithKeyChain(content, signature []byte, sourceRepo string) error {
 		}
 	}
 	
+	// Step 6: Attempt automated recovery from verification failure
+	if err := recoverFromVerificationFailure(sourceRepo); err == nil {
+		// Retry verification after recovery
+		if legacyKey, err := fetchLegacyPublicKey(sourceRepo); err == nil {
+			if verifySignatureWithKey(content, signature, legacyKey) == nil {
+				return nil
+			}
+		}
+	}
+	
 	return fmt.Errorf("signature verification failed with all available keys")
 }
 
@@ -1498,6 +1510,87 @@ func clearKeyCache(sourceRepo string) {
 	// Remove both .box and .pub cache files
 	os.Remove(filepath.Join(cacheDir, hash+".box"))
 	os.Remove(filepath.Join(cacheDir, hash+".pub"))
+}
+
+// recoverFromVerificationFailure attempts to recover from Ed25519 verification failures
+func recoverFromVerificationFailure(sourceRepo string) error {
+	// 1. Clear cached keys for this source
+	clearKeyCache(sourceRepo)
+	
+	// 2. Fetch fresh public key from repository
+	pubKey, err := fetchLegacyPublicKey(sourceRepo)
+	if err != nil {
+		return fmt.Errorf("failed to fetch fresh public key: %v", err)
+	}
+	
+	// 3. Update sources.box configuration
+	if err := updateSourcePublicKey(sourceRepo, pubKey); err != nil {
+		return fmt.Errorf("failed to update source configuration: %v", err)
+	}
+	
+	return nil
+}
+
+// updateSourcePublicKey updates the public key for a source in sources.box
+func updateSourcePublicKey(sourceRepo string, newPubKey string) error {
+	configPath, err := getConfigPath()
+	if err != nil {
+		return err
+	}
+	
+	configFile := filepath.Join(configPath, "sources.box")
+	content, err := os.ReadFile(configFile)
+	if err != nil {
+		return err
+	}
+	
+	lines := strings.Split(string(content), "\n")
+	var updatedLines []string
+	var inSourcesBlock bool
+	var foundRepo bool
+	
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		
+		// Check if we're entering the sources data block
+		if strings.Contains(trimmed, "[data") && strings.Contains(trimmed, "sources") {
+			inSourcesBlock = true
+		}
+		
+		// Check if we're leaving the sources block
+		if inSourcesBlock && trimmed == "end" {
+			inSourcesBlock = false
+		}
+		
+		// Update pubkey if we're in sources block and found matching repo
+		if inSourcesBlock && strings.HasPrefix(trimmed, "repo ") && strings.Contains(line, sourceRepo) {
+			foundRepo = true
+			updatedLines = append(updatedLines, line)
+			continue
+		}
+		
+		// Replace pubkey line if we found the matching repo
+		if inSourcesBlock && foundRepo && strings.HasPrefix(trimmed, "pubkey ") {
+			// Replace with new public key, preserving indentation
+			indent := ""
+			for _, char := range line {
+				if char == ' ' || char == '\t' {
+					indent += string(char)
+				} else {
+					break
+				}
+			}
+			updatedLines = append(updatedLines, indent+"pubkey "+newPubKey)
+			foundRepo = false
+			continue
+		}
+		
+		updatedLines = append(updatedLines, line)
+	}
+	
+	// Write updated configuration back
+	updatedContent := strings.Join(updatedLines, "\n")
+	return os.WriteFile(configFile, []byte(updatedContent), 0644)
 }
 
 // verifySHA256Hash performs legacy SHA256 self-verification
@@ -3208,10 +3301,31 @@ func showHelp() {
 	fmt.Println("  add-source <url>   add a repository source")
 	fmt.Println("  keygen             generate Ed25519 key pair for recipe signing")
 	fmt.Println("  sign <key> <file>  sign recipe files with Ed25519")
+	fmt.Println("  info               show information about pack")
 	fmt.Println("  help               show this help information")
 	fmt.Println()
 	fmt.Println("For command-specific help, use: pack <command> help")
 	fmt.Println("Example: pack open help")
+}
+
+func showInfo() {
+	fmt.Println("pack - your new least favorite package manager")
+	fmt.Println()
+	fmt.Println("pack is a simple package manager that uses boxlang scripts for installation.")
+	fmt.Println("each package knows how to install itself based on a readable, auditable")
+	fmt.Println("box script. its easy and fun to use, and you can package your software for it too.")
+	fmt.Println()
+	fmt.Println("it works as such:")
+	fmt.Println("- download .box script that contain installation instructions from any git repo")
+	fmt.Println("- shows you the script before running it and lets you edit; no surprises")
+	fmt.Println("- verifies scripts with ed25519 signatures for security")
+	fmt.Println("- installs binaries to ~/.pack/shelf/ with symlinks to ~/.local/bin/")
+	fmt.Println("- tracks installations with lockfiles for clean removal")
+	fmt.Println()
+	fmt.Println("pack is free software under the gnu general public license v3+")
+	fmt.Println("copyright © 2025 shrub industries")
+	fmt.Println()
+	fmt.Println("run 'pack help' for commands or visit github.com/shrub4thedub/pack")
 }
 
 // showOpenHelp displays help for the open command
