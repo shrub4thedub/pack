@@ -119,6 +119,13 @@ func main() {
 			os.Exit(1)
 		}
 		addSource(args[1:])
+	case "run":
+		if len(args) < 2 {
+			fmt.Println("error: package name required")
+			fmt.Println("usage: pack run <package>")
+			os.Exit(1)
+		}
+		runPackage(args[1:])
 	case "info":
 		showInfo()
 	case "help":
@@ -3282,6 +3289,109 @@ func updatePackageFromOriginalSource(packageName string) error {
 }
 
 // showHelp displays general help information
+func installPackageForRun(packageName string) error {
+	// Skip core package updates for run command to be faster
+	return executePackageScript(packageName, false, false)
+}
+
+func runPackage(args []string) {
+	if len(args) == 0 {
+		fmt.Println("error: package name required")
+		os.Exit(1)
+	}
+	
+	packageName := args[0]
+	remainingArgs := args[1:]
+	
+	// Check if package is already installed
+	lockPath, err := getLockFilePath(packageName)
+	if err != nil {
+		fmt.Printf("error: %v\n", err)
+		os.Exit(1)
+	}
+	
+	wasInstalled := true
+	if _, err := os.Stat(lockPath); os.IsNotExist(err) {
+		wasInstalled = false
+		
+		// Package not installed, install it temporarily
+		fmt.Printf("Package %s not installed, installing temporarily...\n", packageName)
+		if err := installPackageForRun(packageName); err != nil {
+			fmt.Printf("error installing package %s: %v\n", packageName, err)
+			os.Exit(1)
+		}
+		fmt.Println("✓ Temporary installation complete")
+	}
+	
+	// Get the executable path from lock file
+	lockData, err := parseLockFile(lockPath)
+	if err != nil {
+		fmt.Printf("error reading lock file: %v\n", err)
+		if !wasInstalled {
+			// Clean up temporary installation
+			fmt.Println("Cleaning up temporary installation...")
+			executeUninstallScript(packageName)
+		}
+		os.Exit(1)
+	}
+	
+	// Find the executable - try symlink path first, then shelf path
+	var execPath string
+	if symlinkPath, exists := lockData["symlink_path"]; exists && symlinkPath != "" {
+		execPath = symlinkPath
+	} else if shelfPath, exists := lockData["shelf_path"]; exists && shelfPath != "" {
+		// Construct likely executable path from shelf path and package name
+		execPath = filepath.Join(shelfPath, packageName)
+	} else {
+		fmt.Printf("error: could not determine executable path for %s\n", packageName)
+		if !wasInstalled {
+			fmt.Println("Cleaning up temporary installation...")
+			executeUninstallScript(packageName)
+		}
+		os.Exit(1)
+	}
+	
+	// Check if executable exists
+	if _, err := os.Stat(execPath); os.IsNotExist(err) {
+		fmt.Printf("error: executable not found at %s\n", execPath)
+		if !wasInstalled {
+			fmt.Println("Cleaning up temporary installation...")
+			executeUninstallScript(packageName)
+		}
+		os.Exit(1)
+	}
+	
+	// Run the package
+	fmt.Printf("Running %s...\n", packageName)
+	cmd := exec.Command(execPath, remainingArgs...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	
+	err = cmd.Run()
+	exitCode := 0
+	if err != nil {
+		if exitError, ok := err.(*exec.ExitError); ok {
+			exitCode = exitError.ExitCode()
+		} else {
+			fmt.Printf("error running %s: %v\n", packageName, err)
+			exitCode = 1
+		}
+	}
+	
+	// If it was a temporary installation, clean it up
+	if !wasInstalled {
+		fmt.Println("Cleaning up temporary installation...")
+		if err := executeUninstallScript(packageName); err != nil {
+			fmt.Printf("warning: failed to clean up temporary installation: %v\n", err)
+		} else {
+			fmt.Printf("✓ Temporary installation of %s cleaned up\n", packageName)
+		}
+	}
+	
+	os.Exit(exitCode)
+}
+
 func showHelp() {
 	fmt.Println("pack - a package manager using boxlang")
 	fmt.Println()
@@ -3291,6 +3401,7 @@ func showHelp() {
 	fmt.Println("COMMANDS:")
 	fmt.Println("  open <package>     install a package")
 	fmt.Println("  close <package>    uninstall a package")
+	fmt.Println("  run <package>      run package (install temporarily if needed)")
 	fmt.Println("  shelf              list installed packages")
 	fmt.Println("  list [source]      list all available packages")
 	fmt.Println("  seek <term>        search for packages")
