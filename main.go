@@ -2941,10 +2941,8 @@ type PackageUpdate struct {
 	UpdateType     string // "source updated", "recipe updated", "both updated"
 }
 
-// scanForUpdates checks all installed packages for available updates
+// scanForUpdates checks all installed packages for available updates using concurrent workers
 func scanForUpdates() ([]PackageUpdate, error) {
-	var updates []PackageUpdate
-
 	packPath, err := getPackDir()
 	if err != nil {
 		return nil, err
@@ -2952,7 +2950,7 @@ func scanForUpdates() ([]PackageUpdate, error) {
 
 	locksDir := filepath.Join(packPath, "locks")
 	if _, err := os.Stat(locksDir); os.IsNotExist(err) {
-		return updates, nil // No packages installed
+		return []PackageUpdate{}, nil // No packages installed
 	}
 
 	files, err := os.ReadDir(locksDir)
@@ -2968,28 +2966,101 @@ func scanForUpdates() ([]PackageUpdate, error) {
 		}
 	}
 
-	total := len(lockFiles)
-	for i, fileName := range lockFiles {
-		packageName := strings.TrimSuffix(fileName, ".lock")
-		showProgress(i+1, total, fmt.Sprintf("checking %s...", packageName))
-		
-		lockData, err := parseLockFile(filepath.Join(locksDir, fileName))
-		if err != nil {
-			continue // Skip problematic lock files
-		}
-
-		update, hasUpdate, err := checkPackageForUpdate(packageName, lockData)
-		if err != nil {
-			fmt.Printf("\nwarning: failed to check updates for %s: %v\n", packageName, err)
-			continue
-		}
-
-		if hasUpdate {
-			updates = append(updates, update)
-		}
+	if len(lockFiles) == 0 {
+		return []PackageUpdate{}, nil
 	}
 
+	// Use concurrent workers for faster checking
+	return checkUpdatesParallel(lockFiles, locksDir)
+}
+
+// PackageCheckJob represents a job for checking package updates
+type PackageCheckJob struct {
+	FileName    string
+	PackageName string
+	LocksDir    string
+}
+
+// PackageCheckResult represents the result of checking a package for updates
+type PackageCheckResult struct {
+	Update    PackageUpdate
+	HasUpdate bool
+	Error     error
+	Package   string
+}
+
+// checkUpdatesParallel checks packages for updates using multiple goroutines
+func checkUpdatesParallel(lockFiles []string, locksDir string) ([]PackageUpdate, error) {
+	const maxWorkers = 8 // Limit concurrent network requests
+	
+	total := len(lockFiles)
+	jobs := make(chan PackageCheckJob, total)
+	results := make(chan PackageCheckResult, total)
+	
+	// Start worker goroutines
+	for w := 0; w < maxWorkers && w < total; w++ {
+		go updateCheckWorker(jobs, results)
+	}
+	
+	// Send jobs to workers
+	go func() {
+		defer close(jobs)
+		for _, fileName := range lockFiles {
+			packageName := strings.TrimSuffix(fileName, ".lock")
+			jobs <- PackageCheckJob{
+				FileName:    fileName,
+				PackageName: packageName,
+				LocksDir:    locksDir,
+			}
+		}
+	}()
+	
+	// Collect results and show progress
+	var updates []PackageUpdate
+	completed := 0
+	
+	for completed < total {
+		result := <-results
+		completed++
+		
+		showProgress(completed, total, fmt.Sprintf("checked %s", result.Package))
+		
+		if result.Error != nil {
+			fmt.Printf("\nwarning: failed to check updates for %s: %v\n", result.Package, result.Error)
+			continue
+		}
+		
+		if result.HasUpdate {
+			updates = append(updates, result.Update)
+		}
+	}
+	
 	return updates, nil
+}
+
+// updateCheckWorker is a worker that processes package update check jobs
+func updateCheckWorker(jobs <-chan PackageCheckJob, results chan<- PackageCheckResult) {
+	for job := range jobs {
+		result := PackageCheckResult{
+			Package: job.PackageName,
+		}
+		
+		// Parse lock file
+		lockData, err := parseLockFile(filepath.Join(job.LocksDir, job.FileName))
+		if err != nil {
+			result.Error = err
+			results <- result
+			continue
+		}
+		
+		// Check for updates
+		update, hasUpdate, err := checkPackageForUpdate(job.PackageName, lockData)
+		result.Update = update
+		result.HasUpdate = hasUpdate
+		result.Error = err
+		
+		results <- result
+	}
 }
 
 // parseLockFile parses a lock file and returns a map of key-value pairs
