@@ -2155,15 +2155,73 @@ func refreshPublicKeys() {
 		}
 	}
 	
-	// Refresh keys from each source
+	// Refresh keys from each source concurrently
+	refreshKeysConcurrently(sources)
+}
+
+// refreshKeysConcurrently refreshes public keys from multiple sources in parallel
+func refreshKeysConcurrently(sources []string) {
+	if len(sources) == 0 {
+		return
+	}
+	
+	// Filter out local sources
+	var remoteSources []string
 	for _, source := range sources {
-		if source == "local" {
-			continue // Skip local sources
+		if source != "local" {
+			remoteSources = append(remoteSources, source)
 		}
-		
-		// Try to fetch updated key
-		if _, err := fetchPublicKeyFromRepo(source); err != nil {
-			fmt.Printf("Warning: could not refresh key for %s: %v\n", source, err)
+	}
+	
+	if len(remoteSources) == 0 {
+		return
+	}
+	
+	// Create jobs and results channels
+	jobs := make(chan string, len(remoteSources))
+	results := make(chan keyRefreshResult, len(remoteSources))
+	
+	const maxWorkers = 4 // Limit concurrent key fetches
+	workerCount := maxWorkers
+	if len(remoteSources) < maxWorkers {
+		workerCount = len(remoteSources)
+	}
+	
+	// Start worker goroutines
+	for w := 0; w < workerCount; w++ {
+		go keyRefreshWorker(jobs, results)
+	}
+	
+	// Send jobs
+	go func() {
+		defer close(jobs)
+		for _, source := range remoteSources {
+			jobs <- source
+		}
+	}()
+	
+	// Collect results
+	for i := 0; i < len(remoteSources); i++ {
+		result := <-results
+		if result.Error != nil {
+			fmt.Printf("Warning: could not refresh key for %s: %v\n", result.Source, result.Error)
+		}
+	}
+}
+
+// keyRefreshResult represents the result of a key refresh operation
+type keyRefreshResult struct {
+	Source string
+	Error  error
+}
+
+// keyRefreshWorker processes key refresh jobs
+func keyRefreshWorker(jobs <-chan string, results chan<- keyRefreshResult) {
+	for source := range jobs {
+		_, err := fetchPublicKeyFromRepo(source)
+		results <- keyRefreshResult{
+			Source: source,
+			Error:  err,
 		}
 	}
 }
@@ -2794,34 +2852,86 @@ func listPackagesFromSource(source Source) {
 
 // getPackagesFromSource fetches and parses package information from a source
 func getPackagesFromSource(source Source) []PackageInfo {
+	// Updated list of all known packages
+	commonPackages := []string{
+		"9dir", "boxlang", "btop", "cava", "cbonsai", "cpick", "crystal-orb", 
+		"edith", "fml", "glow", "pack", "packlib", "pfetch", "python", 
+		"shrub9", "vim", // "test", "uninstall" are internal
+	}
+	
+	return checkPackagesParallel(source, commonPackages)
+}
+
+// checkPackagesParallel checks for package existence in parallel
+func checkPackagesParallel(source Source, packageNames []string) []PackageInfo {
+	const maxWorkers = 6 // Limit concurrent downloads
+	
+	jobs := make(chan string, len(packageNames))
+	results := make(chan packageCheckResult, len(packageNames))
+	
+	workerCount := maxWorkers
+	if len(packageNames) < maxWorkers {
+		workerCount = len(packageNames)
+	}
+	
+	// Start worker goroutines
+	for w := 0; w < workerCount; w++ {
+		go packageDiscoveryWorker(source, jobs, results)
+	}
+	
+	// Send jobs
+	go func() {
+		defer close(jobs)
+		for _, pkgName := range packageNames {
+			jobs <- pkgName
+		}
+	}()
+	
+	// Collect results
 	var packages []PackageInfo
+	for i := 0; i < len(packageNames); i++ {
+		result := <-results
+		if result.Package.Name != "" {
+			packages = append(packages, result.Package)
+		}
+	}
 	
-	// For now, this is a simplified implementation
-	// In a real implementation, you might fetch a package index or scan the repository
-	
-	// Try to list common package files by attempting downloads
-	commonPackages := []string{"edith", "pack", "boxlang", "vim", "btop", "crystal-orb", "pfetch"}
-	
-	for _, pkgName := range commonPackages {
+	return packages
+}
+
+// packageCheckResult represents the result of checking a package
+type packageCheckResult struct {
+	Package PackageInfo
+	Error   error
+}
+
+// packageDiscoveryWorker checks if packages exist in a source
+func packageDiscoveryWorker(source Source, jobs <-chan string, results chan<- packageCheckResult) {
+	for pkgName := range jobs {
+		result := packageCheckResult{}
+		
 		scriptURL := getScriptURL(source.URL, pkgName+".box")
 		
 		// Try to download the package file to check if it exists
 		tempFile, err := os.CreateTemp("", "pkg_check_*.box")
 		if err != nil {
+			result.Error = err
+			results <- result
 			continue
 		}
-		defer os.Remove(tempFile.Name())
+		
 		tempFile.Close()
+		defer os.Remove(tempFile.Name())
 		
 		if downloadFile(scriptURL, tempFile.Name()) == nil {
 			// Parse package info from the downloaded file
 			if pkg := parsePackageInfo(tempFile.Name()); pkg.Name != "" {
-				packages = append(packages, pkg)
+				result.Package = pkg
 			}
 		}
+		
+		results <- result
 	}
-	
-	return packages
 }
 
 // parsePackageInfo extracts package information from a .box file
