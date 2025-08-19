@@ -30,6 +30,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -42,7 +43,47 @@ import (
 const (
 	defaultRepo = "https://github.com/shrub4thedub/pack-repo"
 	packDir     = ".pack"
+	
+	// Performance and timeout constants
+	httpTimeoutSeconds        = 30
+	dialTimeoutSeconds        = 10
+	keepAliveSeconds         = 30
+	maxIdleConns             = 100
+	maxIdleConnsPerHost      = 10
+	idleConnTimeoutSeconds   = 90
+	tlsHandshakeTimeoutSeconds = 10
+	
+	// Worker pool constants
+	updateCheckWorkers       = 8
+	keyRefreshWorkers       = 4
+	packageDiscoveryWorkers = 6
+	
+	// Cache and pagination constants
+	cacheExpiryMinutes      = 30
+	coreCheckIntervalHours  = 2
+	maxPackagesDisplay      = 20
+	
+	// File permission constants
+	publicFilePerms  = 0644
+	publicDirPerms   = 0755
+	privateFilePerms = 0600
+	privateDirPerms  = 0700
 )
+
+// Global HTTP client with connection pooling for better performance
+var httpClient = &http.Client{
+	Timeout: httpTimeoutSeconds * time.Second,
+	Transport: &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   dialTimeoutSeconds * time.Second,
+			KeepAlive: keepAliveSeconds * time.Second,
+		}).DialContext,
+		MaxIdleConns:        maxIdleConns,
+		MaxIdleConnsPerHost: maxIdleConnsPerHost,
+		IdleConnTimeout:     idleConnTimeoutSeconds * time.Second,
+		TLSHandshakeTimeout: tlsHandshakeTimeoutSeconds * time.Second,
+	},
+}
 
 type Config struct {
 	Sources []string
@@ -51,6 +92,20 @@ type Config struct {
 type Source struct {
 	URL string
 	Name string
+}
+
+type PackageCache struct {
+	Metadata  map[string]CachedPackage
+	Timestamp time.Time
+}
+
+type CachedPackage struct {
+	Name        string
+	Description string
+	Version     string
+	License     string
+	Source      string
+	CachedAt    time.Time
 }
 
 func main() {
@@ -133,7 +188,7 @@ func main() {
 	case "keygen":
 		generateKeys()
 	case "sign":
-		if len(args) < 2 {
+		if len(args) < 3 {
 			fmt.Println("error: private key and file/directory required")
 			fmt.Println("usage: pack sign <private_key_b64> <file_or_directory>")
 			os.Exit(1)
@@ -177,9 +232,15 @@ func openPackage(args []string) {
 }
 
 func closePackage(args []string) {
-	if args[0] == "help" {
+	if len(args) > 0 && args[0] == "help" {
 		showCloseHelp()
 		return
+	}
+	
+	if len(args) == 0 {
+		fmt.Println("error: package name required")
+		fmt.Println("usage: pack close <package>")
+		os.Exit(1)
 	}
 	
 	packageName := args[0]
@@ -192,9 +253,15 @@ func closePackage(args []string) {
 }
 
 func peekPackage(args []string) {
-	if args[0] == "help" {
+	if len(args) > 0 && args[0] == "help" {
 		showPeekHelp()
 		return
+	}
+	
+	if len(args) == 0 {
+		fmt.Println("error: package name required")
+		fmt.Println("usage: pack peek <package>")
+		os.Exit(1)
 	}
 	
 	packageName := args[0]
@@ -395,8 +462,6 @@ func downloadFile(url, filepath string) error {
 
 // downloadFileWithCache downloads a file with optional ETag caching
 func downloadFileWithCache(url, filepath string, useCache bool) error {
-	client := &http.Client{Timeout: 30 * time.Second}
-	
 	// Prepare request
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -410,7 +475,7 @@ func downloadFileWithCache(url, filepath string, useCache bool) error {
 		}
 	}
 	
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -570,6 +635,15 @@ func editScript(scriptPath string) error {
 	if editor == "" {
 		editor = os.Getenv("VISUAL")
 	}
+	
+	// Validate editor from environment variables for security
+	if editor != "" {
+		if !isValidEditor(editor) {
+			fmt.Printf("warning: potentially unsafe editor '%s' from environment, using fallback\n", editor)
+			editor = ""
+		}
+	}
+	
 	if editor == "" {
 		// Try common editors
 		for _, e := range []string{"vim", "nano", "vi"} {
@@ -590,6 +664,32 @@ func editScript(scriptPath string) error {
 	cmd.Stderr = os.Stderr
 
 	return cmd.Run()
+}
+
+// isValidEditor validates that an editor command is safe to execute
+func isValidEditor(editor string) bool {
+	// Check for basic command injection patterns
+	if strings.Contains(editor, ";") || 
+	   strings.Contains(editor, "&") || 
+	   strings.Contains(editor, "|") ||
+	   strings.Contains(editor, "`") ||
+	   strings.Contains(editor, "$") ||
+	   strings.Contains(editor, "$(") {
+		return false
+	}
+	
+	// Only allow single commands (no spaces except in known safe editors)
+	parts := strings.Fields(editor)
+	if len(parts) == 0 {
+		return false
+	}
+	
+	// Check if the base command exists
+	if _, err := exec.LookPath(parts[0]); err != nil {
+		return false
+	}
+	
+	return true
 }
 
 func showPackageInfo(packageName string) error {
@@ -1215,8 +1315,7 @@ func findAvailableSources(packageName string) ([]PackageSource, error) {
 
 // testPackageExists does a lightweight test to see if a package exists at a URL
 func testPackageExists(url string) bool {
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Head(url)
+	resp, err := httpClient.Head(url)
 	if err != nil {
 		return false
 	}
@@ -1477,7 +1576,7 @@ func fetchPreviousKeyVersions(sourceRepo string, currentVersion int) ([]string, 
 		prevVersion := currentVersion - i
 		keyURL := fmt.Sprintf("%s/raw/main/keys/pack_v%d.box", sourceRepo, prevVersion)
 		
-		resp, err := http.Get(keyURL)
+		resp, err := httpClient.Get(keyURL)
 		if err != nil {
 			continue // Skip missing versions
 		}
@@ -1721,7 +1820,7 @@ type KeyMetadata struct {
 func fetchKeyMetadata(sourceRepo string) (*KeyMetadata, error) {
 	keyURL := fmt.Sprintf("%s/raw/main/keys/pack.box", sourceRepo)
 	
-	resp, err := http.Get(keyURL)
+	resp, err := httpClient.Get(keyURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch key metadata: %v", err)
 	}
@@ -1760,7 +1859,7 @@ func fetchKeyMetadata(sourceRepo string) (*KeyMetadata, error) {
 func fetchLegacyPublicKey(sourceRepo string) (string, error) {
 	keyURL := fmt.Sprintf("%s/raw/main/keys/pack.pub", sourceRepo)
 	
-	resp, err := http.Get(keyURL)
+	resp, err := httpClient.Get(keyURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch legacy public key: %v", err)
 	}
@@ -1827,7 +1926,7 @@ func cachePublicKey(sourceRepo, pubkey string) error {
 	}
 	
 	cacheDir := filepath.Join(packPath, "cache", "keys")
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+	if err := os.MkdirAll(cacheDir, privateDirPerms); err != nil {
 		return err
 	}
 	
@@ -1835,7 +1934,7 @@ func cachePublicKey(sourceRepo, pubkey string) error {
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(sourceRepo)))
 	keyFile := filepath.Join(cacheDir, hash+".pub")
 	
-	return os.WriteFile(keyFile, []byte(pubkey+"\n"), 0644)
+	return os.WriteFile(keyFile, []byte(pubkey+"\n"), privateFilePerms)
 }
 
 // getCachedPublicKeyWithVersion retrieves a cached public key with version info
@@ -1874,7 +1973,7 @@ func cachePublicKeyWithVersion(sourceRepo string, metadata *KeyMetadata) error {
 	}
 	
 	cacheDir := filepath.Join(packPath, "cache", "keys")
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+	if err := os.MkdirAll(cacheDir, privateDirPerms); err != nil {
 		return err
 	}
 	
@@ -1894,7 +1993,7 @@ end
   key %s
 end`, metadata.Version, metadata.IssuedAt, metadata.ExpiresAt, metadata.Algorithm, time.Now().Unix(), metadata.Key)
 	
-	return os.WriteFile(keyFile, []byte(cacheContent), 0644)
+	return os.WriteFile(keyFile, []byte(cacheContent), privateFilePerms)
 }
 
 // shouldRefreshKey determines if a cached key should be refreshed
@@ -2181,9 +2280,8 @@ func refreshKeysConcurrently(sources []string) {
 	jobs := make(chan string, len(remoteSources))
 	results := make(chan keyRefreshResult, len(remoteSources))
 	
-	const maxWorkers = 4 // Limit concurrent key fetches
-	workerCount := maxWorkers
-	if len(remoteSources) < maxWorkers {
+	workerCount := keyRefreshWorkers
+	if len(remoteSources) < keyRefreshWorkers {
 		workerCount = len(remoteSources)
 	}
 	
@@ -2829,7 +2927,7 @@ type PackageInfo struct {
 	License     string
 }
 
-// listPackagesFromSource lists packages from a specific source
+// listPackagesFromSource lists packages from a specific source with smart pagination
 func listPackagesFromSource(source Source) {
 	packages := getPackagesFromSource(source)
 	
@@ -2841,12 +2939,25 @@ func listPackagesFromSource(source Source) {
 	fmt.Printf("  %-15s %-50s %s\n", "name", "description", "license")
 	fmt.Printf("  %-15s %-50s %s\n", "----", "-----------", "-------")
 	
-	for _, pkg := range packages {
+	// For large lists, show first packages and total count
+	displayCount := len(packages)
+	if displayCount > maxPackagesDisplay {
+		displayCount = maxPackagesDisplay
+	}
+	
+	for i := 0; i < displayCount; i++ {
+		pkg := packages[i]
 		desc := pkg.Description
 		if len(desc) > 50 {
 			desc = desc[:47] + "..."
 		}
 		fmt.Printf("  %-15s %-50s %s\n", pkg.Name, desc, pkg.License)
+	}
+	
+	// Show summary if list was truncated
+	if len(packages) > maxPackagesDisplay {
+		fmt.Printf("\n  showing %d of %d packages (use 'pack seek' to search for specific packages)\n", 
+			maxPackagesDisplay, len(packages))
 	}
 }
 
@@ -2864,13 +2975,12 @@ func getPackagesFromSource(source Source) []PackageInfo {
 
 // checkPackagesParallel checks for package existence in parallel
 func checkPackagesParallel(source Source, packageNames []string) []PackageInfo {
-	const maxWorkers = 6 // Limit concurrent downloads
 	
 	jobs := make(chan string, len(packageNames))
 	results := make(chan packageCheckResult, len(packageNames))
 	
-	workerCount := maxWorkers
-	if len(packageNames) < maxWorkers {
+	workerCount := packageDiscoveryWorkers
+	if len(packageNames) < packageDiscoveryWorkers {
 		workerCount = len(packageNames)
 	}
 	
@@ -3101,14 +3211,13 @@ type PackageCheckResult struct {
 
 // checkUpdatesParallel checks packages for updates using multiple goroutines
 func checkUpdatesParallel(lockFiles []string, locksDir string) ([]PackageUpdate, error) {
-	const maxWorkers = 8 // Limit concurrent network requests
 	
 	total := len(lockFiles)
 	jobs := make(chan PackageCheckJob, total)
 	results := make(chan PackageCheckResult, total)
 	
 	// Start worker goroutines
-	for w := 0; w < maxWorkers && w < total; w++ {
+	for w := 0; w < updateCheckWorkers && w < total; w++ {
 		go updateCheckWorker(jobs, results)
 	}
 	
@@ -3597,6 +3706,74 @@ func runPackage(args []string) {
 	os.Exit(exitCode)
 }
 
+// Package metadata caching functions
+func getCacheFilePath() (string, error) {
+	packPath, err := getPackDir()
+	if err != nil {
+		return "", err
+	}
+	cacheDir := filepath.Join(packPath, "cache")
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create cache directory: %v", err)
+	}
+	return filepath.Join(cacheDir, "packages.cache"), nil
+}
+
+func loadPackageCache() (*PackageCache, error) {
+	cachePath, err := getCacheFilePath()
+	if err != nil {
+		return &PackageCache{Metadata: make(map[string]CachedPackage)}, nil
+	}
+	
+	data, err := os.ReadFile(cachePath)
+	if err != nil {
+		return &PackageCache{Metadata: make(map[string]CachedPackage)}, nil
+	}
+	
+	cache := &PackageCache{Metadata: make(map[string]CachedPackage)}
+	lines := strings.Split(string(data), "\n")
+	
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) >= 6 {
+			cachedAt, _ := time.Parse(time.RFC3339, parts[5])
+			cache.Metadata[parts[0]] = CachedPackage{
+				Name:        parts[0],
+				Description: parts[1],
+				Version:     parts[2],
+				License:     parts[3],
+				Source:      parts[4],
+				CachedAt:    cachedAt,
+			}
+		}
+	}
+	
+	return cache, nil
+}
+
+func savePackageCache(cache *PackageCache) error {
+	cachePath, err := getCacheFilePath()
+	if err != nil {
+		return err
+	}
+	
+	var lines []string
+	for _, pkg := range cache.Metadata {
+		line := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s",
+			pkg.Name, pkg.Description, pkg.Version, pkg.License, pkg.Source, pkg.CachedAt.Format(time.RFC3339))
+		lines = append(lines, line)
+	}
+	
+	return os.WriteFile(cachePath, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+}
+
+func isCacheExpired(cachedAt time.Time) bool {
+	return time.Since(cachedAt) > cacheExpiryMinutes*time.Minute
+}
+
 func showHelp() {
 	fmt.Println("pack - a package manager using boxlang")
 	fmt.Println()
@@ -3956,6 +4133,11 @@ func cleanTempDirectory(args []string) {
 
 // checkAndUpdateCorePackages silently checks and updates pack/boxlang before package installation
 func checkAndUpdateCorePackages() {
+	// Skip if we checked recently (within last 2 hours)
+	if shouldSkipCoreCheck() {
+		return
+	}
+	
 	corePackages := []string{"pack", "boxlang"}
 	
 	for _, packageName := range corePackages {
@@ -3968,6 +4150,46 @@ func checkAndUpdateCorePackages() {
 			}
 		}
 	}
+	
+	// Update timestamp after check
+	updateCoreCheckTimestamp()
+}
+
+func shouldSkipCoreCheck() bool {
+	packPath, err := getPackDir()
+	if err != nil {
+		return false
+	}
+	
+	timestampFile := filepath.Join(packPath, "cache", "core_check_timestamp")
+	data, err := os.ReadFile(timestampFile)
+	if err != nil {
+		return false
+	}
+	
+	timestamp, err := time.Parse(time.RFC3339, strings.TrimSpace(string(data)))
+	if err != nil {
+		return false
+	}
+	
+	// Skip if checked within last core check interval
+	return time.Since(timestamp) < coreCheckIntervalHours*time.Hour
+}
+
+func updateCoreCheckTimestamp() {
+	packPath, err := getPackDir()
+	if err != nil {
+		return
+	}
+	
+	cacheDir := filepath.Join(packPath, "cache")
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return
+	}
+	
+	timestampFile := filepath.Join(cacheDir, "core_check_timestamp")
+	timestamp := time.Now().Format(time.RFC3339)
+	os.WriteFile(timestampFile, []byte(timestamp), 0644)
 }
 
 // updateCorePackagesFirst prioritizes pack and boxlang updates during pack update
