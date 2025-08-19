@@ -3015,15 +3015,36 @@ func checkUpdatesParallel(lockFiles []string, locksDir string) ([]PackageUpdate,
 		}
 	}()
 	
-	// Collect results and show progress
+	// Collect results and show progress with better synchronization
 	var updates []PackageUpdate
 	completed := 0
+	
+	// Use a ticker to limit progress updates to prevent terminal glitching
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	
+	lastProgressUpdate := 0
+	
+	progressUpdate := func() {
+		if completed > lastProgressUpdate {
+			showProgress(completed, total, "")
+			lastProgressUpdate = completed
+		}
+	}
+	
+	// Progress update goroutine
+	go func() {
+		for range ticker.C {
+			if completed >= total {
+				return
+			}
+			progressUpdate()
+		}
+	}()
 	
 	for completed < total {
 		result := <-results
 		completed++
-		
-		showProgress(completed, total, fmt.Sprintf("checked %s", result.Package))
 		
 		if result.Error != nil {
 			fmt.Printf("\nwarning: failed to check updates for %s: %v\n", result.Package, result.Error)
@@ -3034,6 +3055,9 @@ func checkUpdatesParallel(lockFiles []string, locksDir string) ([]PackageUpdate,
 			updates = append(updates, result.Update)
 		}
 	}
+	
+	// Final progress update
+	progressUpdate()
 	
 	return updates, nil
 }
