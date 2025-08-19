@@ -21,7 +21,7 @@ cd pack
 go build -o pack main.go
 
 # put everything in it's right place
-./pack bootstrap
+./pack open pack
 
 ```
 
