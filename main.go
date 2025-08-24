@@ -1277,6 +1277,7 @@ func findAvailableSources(packageName string) ([]PackageSource, error) {
 	// Check local source if it exists
 	localRepoPath, err := getLocalRepoPath()
 	if err == nil {
+		// First try the old flat structure for backward compatibility
 		localPackagePath := filepath.Join(localRepoPath, packageName+".box")
 		if _, err := os.Stat(localPackagePath); err == nil {
 			availableSources = append(availableSources, PackageSource{
@@ -1284,6 +1285,20 @@ func findAvailableSources(packageName string) ([]PackageSource, error) {
 				URL:  localPackagePath,
 				Type: "local",
 			})
+		} else {
+			// If not found in flat structure, search through the new section-based structure
+			sections := []string{"lang", "utils", "toys", "misc"}
+			for _, section := range sections {
+				localPackagePath := filepath.Join(localRepoPath, section, packageName, packageName+".box")
+				if _, err := os.Stat(localPackagePath); err == nil {
+					availableSources = append(availableSources, PackageSource{
+						Name: "local",
+						URL:  localPackagePath,
+						Type: "local",
+					})
+					break // Found in this section, no need to check others
+				}
+			}
 		}
 	}
 	
@@ -1291,19 +1306,42 @@ func findAvailableSources(packageName string) ([]PackageSource, error) {
 	config, err := loadConfig()
 	if err == nil && len(config.Sources) > 0 {
 		for _, source := range config.Sources {
-			// Try raw github content URL format
-			scriptURL := fmt.Sprintf("%s/raw/main/%s.box", source, packageName)
+			// First try the old flat structure for backward compatibility
+			var scriptURL string
 			if strings.Contains(source, "raw.githubusercontent.com") {
 				scriptURL = fmt.Sprintf("%s/%s.box", source, packageName)
+			} else {
+				scriptURL = fmt.Sprintf("%s/raw/main/%s.box", source, packageName)
 			}
 			
-			// Test if package exists at this source (lightweight check)
 			if testPackageExists(scriptURL) {
 				availableSources = append(availableSources, PackageSource{
 					Name: source,
 					URL:  scriptURL,
 					Type: "remote",
 				})
+			} else {
+				// If not found in flat structure, search through sections in remote repos
+				sections := []string{"lang", "utils", "toys", "misc"}
+				
+				for _, section := range sections {
+					// Try raw github content URL format
+					if strings.Contains(source, "raw.githubusercontent.com") {
+						scriptURL = fmt.Sprintf("%s/%s/%s/%s.box", source, section, packageName, packageName)
+					} else {
+						scriptURL = fmt.Sprintf("%s/raw/main/%s/%s/%s.box", source, section, packageName, packageName)
+					}
+					
+					// Test if package exists at this source (lightweight check)
+					if testPackageExists(scriptURL) {
+						availableSources = append(availableSources, PackageSource{
+							Name: source,
+							URL:  scriptURL,
+							Type: "remote",
+						})
+						break // Found in this section, no need to check others
+					}
+				}
 			}
 		}
 	}
@@ -3018,7 +3056,13 @@ func packageDiscoveryWorker(source Source, jobs <-chan string, results chan<- pa
 	for pkgName := range jobs {
 		result := packageCheckResult{}
 		
-		scriptURL := getScriptURL(source.URL, pkgName+".box")
+		// First try the old flat structure for backward compatibility
+		var scriptURL string
+		if strings.Contains(source.URL, "raw.githubusercontent.com") {
+			scriptURL = fmt.Sprintf("%s/%s.box", source.URL, pkgName)
+		} else {
+			scriptURL = fmt.Sprintf("%s/raw/main/%s.box", source.URL, pkgName)
+		}
 		
 		// Try to download the package file to check if it exists
 		tempFile, err := os.CreateTemp("", "pkg_check_*.box")
@@ -3035,6 +3079,26 @@ func packageDiscoveryWorker(source Source, jobs <-chan string, results chan<- pa
 			// Parse package info from the downloaded file
 			if pkg := parsePackageInfo(tempFile.Name()); pkg.Name != "" {
 				result.Package = pkg
+			}
+		} else {
+			// If not found in flat structure, search through sections
+			sections := []string{"lang", "utils", "toys", "misc"}
+			
+			for _, section := range sections {
+				// Try raw github content URL format
+				if strings.Contains(source.URL, "raw.githubusercontent.com") {
+					scriptURL = fmt.Sprintf("%s/%s/%s/%s.box", source.URL, section, pkgName, pkgName)
+				} else {
+					scriptURL = fmt.Sprintf("%s/raw/main/%s/%s/%s.box", source.URL, section, pkgName, pkgName)
+				}
+				
+				if downloadFile(scriptURL, tempFile.Name()) == nil {
+					// Parse package info from the downloaded file
+					if pkg := parsePackageInfo(tempFile.Name()); pkg.Name != "" {
+						result.Package = pkg
+					}
+					break
+				}
 			}
 		}
 		
