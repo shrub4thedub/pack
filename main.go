@@ -192,6 +192,13 @@ func main() {
 			os.Exit(1)
 		}
 		signFiles(args[1], args[2])
+	case "repo":
+		if len(args) < 2 {
+			fmt.Println("error: repo subcommand required")
+			fmt.Println("usage: pack repo <create|keygen|sign>")
+			os.Exit(1)
+		}
+		handleRepoCommand(args[1:])
 	default:
 		fmt.Printf("error: unknown command '%s'\n", command)
 		fmt.Println("run 'pack help' for usage information")
@@ -1598,10 +1605,29 @@ func verifyRecipeIntegrity(scriptPath string, sourceRepo string) error {
 func verifyEd25519Signature(scriptPath string, sourceRepo string) error {
 	// Download signature file first
 	sigPath := scriptPath + ".sig"
-	sigURL := strings.Replace(getScriptURL(sourceRepo, filepath.Base(scriptPath)), ".box", ".box.sig", 1)
+	
+	// Try to download signature file (support both old and new formats)
+	packageName := strings.TrimSuffix(filepath.Base(scriptPath), ".box")
+	
+	// First try old flat structure
+	sigURL := fmt.Sprintf("%s/raw/main/%s.box.sig", sourceRepo, packageName)
 	
 	if err := downloadFile(sigURL, sigPath); err != nil {
-		return fmt.Errorf("failed to download signature: %v", err)
+		// If old structure fails, try new section-based structure
+		sections := []string{"lang", "utils", "toys", "misc"}
+		found := false
+		
+		for _, section := range sections {
+			sigURL = fmt.Sprintf("%s/raw/main/%s/%s/%s.box.sig", sourceRepo, section, packageName, packageName)
+			if err := downloadFile(sigURL, sigPath); err == nil {
+				found = true
+				break
+			}
+		}
+		
+		if !found {
+			return fmt.Errorf("failed to download signature: signature file not found in any location")
+		}
 	}
 	defer os.Remove(sigPath)
 	
@@ -3999,6 +4025,7 @@ func showHelp() {
 	fmt.Println("  add-source <url>   add a repository source")
 	fmt.Println("  keygen             generate Ed25519 key pair for recipe signing")
 	fmt.Println("  sign <key> <file>  sign recipe files with Ed25519")
+	fmt.Println("  repo <subcommand>  repository management commands")
 	fmt.Println("  info               show information about pack")
 	fmt.Println("  help               show this help information")
 	fmt.Println()
@@ -4496,4 +4523,335 @@ func isPackageUpToDate(packageName string) bool {
 
 	_, hasUpdate, err := checkPackageForUpdate(packageName, lockData)
 	return err == nil && !hasUpdate
+}
+
+// Repository management commands
+
+// handleRepoCommand handles the pack repo subcommands
+func handleRepoCommand(args []string) {
+	if len(args) == 0 {
+		showRepoHelp()
+		return
+	}
+
+	subcommand := args[0]
+	switch subcommand {
+	case "create":
+		repoCreate(args[1:])
+	case "keygen":
+		repoKeygen(args[1:])
+	case "sign":
+		repoSign(args[1:])
+	case "help":
+		showRepoHelp()
+	default:
+		fmt.Printf("error: unknown repo subcommand '%s'\n", subcommand)
+		fmt.Println("usage: pack repo <create|keygen|sign>")
+		os.Exit(1)
+	}
+}
+
+// showRepoHelp displays help for the repo commands
+func showRepoHelp() {
+	fmt.Println("pack repo - repository management commands")
+	fmt.Println()
+	fmt.Println("USAGE:")
+	fmt.Println("  pack repo create   create a new pack repository")
+	fmt.Println("  pack repo keygen   generate keys for current repository")
+	fmt.Println("  pack repo sign     sign all packages in current repository")
+	fmt.Println("  pack repo help     show this help")
+	fmt.Println()
+	fmt.Println("DESCRIPTION:")
+	fmt.Println("  Repository management commands for creating and maintaining")
+	fmt.Println("  pack repositories with proper structure and signing.")
+}
+
+// repoCreate creates a new pack repository in the current directory
+func repoCreate(args []string) {
+	if len(args) > 0 && args[0] == "help" {
+		fmt.Println("pack repo create - create a new pack repository")
+		fmt.Println()
+		fmt.Println("USAGE:")
+		fmt.Println("  pack repo create")
+		fmt.Println()
+		fmt.Println("DESCRIPTION:")
+		fmt.Println("  Creates a new pack repository with proper directory structure:")
+		fmt.Println("  - keys/        for signing keys")
+		fmt.Println("  - lang/        for programming languages")
+		fmt.Println("  - utils/       for system utilities")
+		fmt.Println("  - toys/        for fun tools")
+		fmt.Println("  - misc/        for miscellaneous packages")
+		fmt.Println("  - README.md    with usage instructions")
+		fmt.Println("  - .gitignore   for git")
+		return
+	}
+
+	fmt.Println("Creating new pack repository...")
+
+	// Check if we're already in a pack repo
+	if _, err := os.Stat("keys"); err == nil {
+		fmt.Println("error: keys/ directory already exists - already a pack repository?")
+		os.Exit(1)
+	}
+
+	// Create directory structure
+	dirs := []string{"keys", "lang", "utils", "toys", "misc"}
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			fmt.Printf("error creating directory %s: %v\n", dir, err)
+			os.Exit(1)
+		}
+	}
+
+	// Create README.md
+	readmeContent := `# Pack Repository
+
+This is a pack repository containing packages that can be installed with the pack package manager.
+
+## Repository Structure
+
+- ` + "`lang/`" + ` - Programming languages and development tools
+- ` + "`utils/`" + ` - System utilities and tools
+- ` + "`toys/`" + ` - Fun and recreational packages
+- ` + "`misc/`" + ` - Miscellaneous packages
+- ` + "`keys/`" + ` - Signing keys for package verification
+
+Each package is stored in ` + "`section/package-name/package-name.box`" + ` with a corresponding ` + "`.box.sig`" + ` signature file.
+
+## Adding Packages
+
+1. Create a directory: ` + "`section/package-name/`" + `
+2. Add your recipe: ` + "`package-name.box`" + `
+3. Sign the package: ` + "`pack repo sign`" + `
+
+## Repository Management
+
+- ` + "`pack repo create`" + ` - Create new repository
+- ` + "`pack repo keygen`" + ` - Generate signing keys
+- ` + "`pack repo sign`" + ` - Sign all packages
+
+## Usage
+
+Add this repository to pack:
+` + "```bash" + `
+pack add-source https://github.com/username/repo-name
+` + "```" + `
+
+Install packages:
+` + "```bash" + `
+pack open package-name
+` + "```" + `
+`
+
+	if err := os.WriteFile("README.md", []byte(readmeContent), 0644); err != nil {
+		fmt.Printf("error creating README.md: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Create .gitignore
+	gitignoreContent := `# Pack repository gitignore
+*.tmp
+.pack/
+*.bak
+*~
+.DS_Store
+`
+
+	if err := os.WriteFile(".gitignore", []byte(gitignoreContent), 0644); err != nil {
+		fmt.Printf("error creating .gitignore: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Initialize git repository
+	if err := exec.Command("git", "init").Run(); err != nil {
+		fmt.Println("warning: failed to initialize git repository")
+	}
+
+	fmt.Println("✓ Repository structure created")
+	fmt.Println("✓ README.md created")
+	fmt.Println("✓ .gitignore created")
+	fmt.Println("✓ Git repository initialized")
+	fmt.Println()
+	fmt.Println("Next steps:")
+	fmt.Println("1. Generate signing keys: pack repo keygen")
+	fmt.Println("2. Add your packages to the appropriate sections")
+	fmt.Println("3. Sign packages: pack repo sign")
+	fmt.Println("4. Commit and push to a git hosting service")
+}
+
+// repoKeygen generates keys for the current repository
+func repoKeygen(args []string) {
+	if len(args) > 0 && args[0] == "help" {
+		fmt.Println("pack repo keygen - generate keys for current repository")
+		fmt.Println()
+		fmt.Println("USAGE:")
+		fmt.Println("  pack repo keygen")
+		fmt.Println()
+		fmt.Println("DESCRIPTION:")
+		fmt.Println("  Generates new Ed25519 keys for the current pack repository.")
+		fmt.Println("  Automatically writes the public key to keys/pack.box and")
+		fmt.Println("  displays the private key for secure storage.")
+		return
+	}
+
+	// Check if we're in a pack repository
+	if _, err := os.Stat("keys"); os.IsNotExist(err) {
+		fmt.Println("error: not in a pack repository (no keys/ directory found)")
+		fmt.Println("run 'pack repo create' to create a new repository")
+		os.Exit(1)
+	}
+
+	fmt.Println("Generating Ed25519 key pair for repository...")
+
+	// Generate key pair
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		fmt.Printf("Failed to generate keys: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Base64 encode keys
+	publicB64 := base64.StdEncoding.EncodeToString(publicKey)
+	privateB64 := base64.StdEncoding.EncodeToString(privateKey)
+
+	// Create keys/pack.box with proper structure
+	now := time.Now().Unix()
+	expires := time.Now().Add(2 * 365 * 24 * time.Hour).Unix() // 2 years
+
+	keyContent := fmt.Sprintf(`[data -c keyinfo]
+  version     2
+  issued_at   %d
+  expires_at  %d
+  algorithm   ed25519
+end
+
+[data -c pubkey]
+  key %s
+end
+`, now, expires, publicB64)
+
+	if err := os.WriteFile("keys/pack.box", []byte(keyContent), 0644); err != nil {
+		fmt.Printf("Failed to write keys/pack.box: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Remove legacy pack.pub if it exists
+	if _, err := os.Stat("keys/pack.pub"); err == nil {
+		os.Remove("keys/pack.pub")
+		fmt.Println("✓ Removed legacy keys/pack.pub")
+	}
+
+	fmt.Println()
+	fmt.Println("🔑 Key pair generated successfully!")
+	fmt.Println()
+	fmt.Printf("Public key written to: keys/pack.box\n")
+	fmt.Printf("Private key: %s\n", privateB64)
+	fmt.Println()
+	fmt.Println("⚠️  IMPORTANT: Save the private key securely!")
+	fmt.Println("📋 Next steps:")
+	fmt.Println("1. Commit keys/pack.box to your repository")
+	fmt.Println("2. Store the private key safely (you'll need it to sign packages)")
+	fmt.Println("3. Sign packages: pack repo sign <private_key>")
+}
+
+// repoSign signs all packages in the current repository
+func repoSign(args []string) {
+	if len(args) > 0 && args[0] == "help" {
+		fmt.Println("pack repo sign - sign all packages in current repository")
+		fmt.Println()
+		fmt.Println("USAGE:")
+		fmt.Println("  pack repo sign <private_key>")
+		fmt.Println()
+		fmt.Println("DESCRIPTION:")
+		fmt.Println("  Signs all .box files in the current repository with the")
+		fmt.Println("  provided private key. Searches all sections (lang, utils,")
+		fmt.Println("  toys, misc) and the repository root.")
+		return
+	}
+
+	if len(args) == 0 {
+		fmt.Println("error: private key required")
+		fmt.Println("usage: pack repo sign <private_key>")
+		os.Exit(1)
+	}
+
+	// Check if we're in a pack repository
+	if _, err := os.Stat("keys"); os.IsNotExist(err) {
+		fmt.Println("error: not in a pack repository (no keys/ directory found)")
+		fmt.Println("run 'pack repo create' to create a new repository")
+		os.Exit(1)
+	}
+
+	privateKeyB64 := args[0]
+
+	// Decode private key
+	privateKeyBytes, err := base64.StdEncoding.DecodeString(privateKeyB64)
+	if err != nil {
+		fmt.Printf("Failed to decode private key: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(privateKeyBytes) != ed25519.PrivateKeySize {
+		fmt.Printf("Invalid private key size: expected %d, got %d\n", ed25519.PrivateKeySize, len(privateKeyBytes))
+		os.Exit(1)
+	}
+
+	privateKey := ed25519.PrivateKey(privateKeyBytes)
+
+	fmt.Println("Signing all packages in repository...")
+
+	// Find all .box files in the repository
+	var boxFiles []string
+
+	// Check repository root
+	if files, err := filepath.Glob("*.box"); err == nil {
+		boxFiles = append(boxFiles, files...)
+	}
+
+	// Check all sections
+	sections := []string{"lang", "utils", "toys", "misc"}
+	for _, section := range sections {
+		pattern := filepath.Join(section, "*", "*.box")
+		if files, err := filepath.Glob(pattern); err == nil {
+			boxFiles = append(boxFiles, files...)
+		}
+	}
+
+	if len(boxFiles) == 0 {
+		fmt.Println("No .box files found in repository")
+		return
+	}
+
+	fmt.Printf("Found %d package(s) to sign:\n", len(boxFiles))
+	for _, file := range boxFiles {
+		fmt.Printf("  - %s\n", file)
+	}
+	fmt.Println()
+
+	// Sign all files
+	var signedCount int
+	var failedCount int
+
+	for _, boxFile := range boxFiles {
+		fmt.Printf("Signing %s...", boxFile)
+		
+		if err := signFile(privateKey, boxFile); err != nil {
+			fmt.Printf(" ✗ failed: %v\n", err)
+			failedCount++
+		} else {
+			fmt.Printf(" ✓\n")
+			signedCount++
+		}
+	}
+
+	fmt.Println()
+	fmt.Printf("✓ Successfully signed: %d packages\n", signedCount)
+	if failedCount > 0 {
+		fmt.Printf("✗ Failed to sign: %d packages\n", failedCount)
+		os.Exit(1)
+	}
+	
+	fmt.Println()
+	fmt.Println("All packages signed successfully!")
+	fmt.Println("Commit the .sig files to your repository.")
 }
