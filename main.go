@@ -3637,13 +3637,31 @@ func getCurrentRecipeVersion(recipeURL string) (string, error) {
 				packageName := strings.TrimSuffix(boxFile, ".box")
 				baseURL := strings.Replace(recipeURL, "/raw/main/"+boxFile, "", 1)
 				
-				// Try each section
+				// Try each section with proper raw.githubusercontent.com format
 				sections := []string{"lang", "utils", "toys", "misc"}
-				for _, section := range sections {
-					newURL := fmt.Sprintf("%s/raw/main/%s/%s/%s", baseURL, section, packageName, boxFile)
-					if err := downloadFileWithCache(newURL, tempFile.Name(), false); err == nil {
-						// Calculate version hash
-						return calculateRecipeVersion(tempFile.Name())
+				
+				// Convert to raw.githubusercontent.com format if needed
+				var rawBaseURL string
+				if strings.Contains(baseURL, "github.com") && strings.Contains(baseURL, "/raw/main") {
+					// Extract user/repo from baseURL
+					urlParts := strings.Split(baseURL, "/")
+					for i, part := range urlParts {
+						if part == "github.com" && i+2 < len(urlParts) {
+							user := urlParts[i+1]
+							repo := urlParts[i+2]
+							rawBaseURL = fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/main", user, repo)
+							break
+						}
+					}
+				}
+				
+				if rawBaseURL != "" {
+					for _, section := range sections {
+						newURL := fmt.Sprintf("%s/%s/%s/%s", rawBaseURL, section, packageName, boxFile)
+						if err := downloadFileWithCache(newURL, tempFile.Name(), false); err == nil {
+							// Calculate version hash
+							return calculateRecipeVersion(tempFile.Name())
+						}
 					}
 				}
 			}
@@ -3724,7 +3742,7 @@ func updatePackageFromOriginalSource(packageName string) error {
 			return fmt.Errorf("failed to copy from local source: %v", err)
 		}
 	} else {
-		// Use remote source
+		// Use remote source - first try old flat structure
 		scriptURL := fmt.Sprintf("%s/raw/main/%s.box", originalRepo, packageName)
 		
 		selectedSource = PackageSource{
@@ -3734,7 +3752,39 @@ func updatePackageFromOriginalSource(packageName string) error {
 		}
 		
 		if err := downloadFile(scriptURL, scriptPath); err != nil {
-			return fmt.Errorf("failed to download from original source: %v", err)
+			// If old format fails, try new section-based structure
+			found := false
+			sections := []string{"misc", "utils", "lang", "toys"}
+			
+			// Convert to raw.githubusercontent.com format if needed
+			var rawBaseURL string
+			if strings.Contains(originalRepo, "github.com") {
+				// Extract user/repo from originalRepo
+				urlParts := strings.Split(originalRepo, "/")
+				for i, part := range urlParts {
+					if part == "github.com" && i+2 < len(urlParts) {
+						user := urlParts[i+1]
+						repo := urlParts[i+2]
+						rawBaseURL = fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/main", user, repo)
+						break
+					}
+				}
+			}
+			
+			if rawBaseURL != "" {
+				for _, section := range sections {
+					newURL := fmt.Sprintf("%s/%s/%s/%s.box", rawBaseURL, section, packageName, packageName)
+					if err := downloadFile(newURL, scriptPath); err == nil {
+						selectedSource.URL = newURL
+						found = true
+						break
+					}
+				}
+			}
+			
+			if !found {
+				return fmt.Errorf("failed to download from original source: %v", err)
+			}
 		}
 	}
 	
