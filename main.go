@@ -2747,20 +2747,46 @@ func executeUninstallScript(packageName string) error {
 	originalRepo := lockData["repo"]
 	
 	if originalRepo == "local" {
-		// Use local source
+		// Use local source - try both old and new formats
 		localRepoPath, err := getLocalRepoPath()
 		if err != nil {
 			return fmt.Errorf("failed to get local repo path: %v", err)
 		}
+		
+		// First try old flat structure
 		localPackagePath := filepath.Join(localRepoPath, packageName+".box")
 		if err := copyFile(localPackagePath, scriptPath); err != nil {
-			return fmt.Errorf("failed to copy from local source: %v", err)
+			// If old structure fails, try new section-based structure
+			sections := []string{"lang", "utils", "toys", "misc"}
+			found := false
+			for _, section := range sections {
+				localPackagePath = filepath.Join(localRepoPath, section, packageName, packageName+".box")
+				if err := copyFile(localPackagePath, scriptPath); err == nil {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("failed to find package in local source: %v", err)
+			}
 		}
 	} else {
-		// Use remote source
+		// Use remote source - try both old and new formats
 		scriptURL := fmt.Sprintf("%s/raw/main/%s.box", originalRepo, packageName)
 		if err := downloadFile(scriptURL, scriptPath); err != nil {
-			return fmt.Errorf("failed to download recipe: %v", err)
+			// If old structure fails, try new section-based structure
+			sections := []string{"lang", "utils", "toys", "misc"}
+			found := false
+			for _, section := range sections {
+				scriptURL = fmt.Sprintf("%s/raw/main/%s/%s/%s.box", originalRepo, section, packageName, packageName)
+				if err := downloadFile(scriptURL, scriptPath); err == nil {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("failed to download recipe: %v", err)
+			}
 		}
 	}
 	
@@ -3478,6 +3504,26 @@ func getCurrentRecipeVersion(recipeURL string) (string, error) {
 
 	// Download recipe without ETag caching for update checks
 	if err := downloadFileWithCache(recipeURL, tempFile.Name(), false); err != nil {
+		// If old URL format fails, try new section-based structure
+		if strings.Contains(recipeURL, "/raw/main/") && strings.HasSuffix(recipeURL, ".box") {
+			// Extract package name from URL
+			parts := strings.Split(recipeURL, "/")
+			if len(parts) > 0 {
+				boxFile := parts[len(parts)-1] // e.g., "pfetch.box"
+				packageName := strings.TrimSuffix(boxFile, ".box")
+				baseURL := strings.Replace(recipeURL, "/raw/main/"+boxFile, "", 1)
+				
+				// Try each section
+				sections := []string{"lang", "utils", "toys", "misc"}
+				for _, section := range sections {
+					newURL := fmt.Sprintf("%s/raw/main/%s/%s/%s", baseURL, section, packageName, boxFile)
+					if err := downloadFileWithCache(newURL, tempFile.Name(), false); err == nil {
+						// Calculate version hash
+						return calculateRecipeVersion(tempFile.Name())
+					}
+				}
+			}
+		}
 		return "", err
 	}
 
