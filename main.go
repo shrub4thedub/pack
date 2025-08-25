@@ -131,8 +131,8 @@ func main() {
 	switch command {
 	case "open":
 		if len(args) < 2 {
-			fmt.Println("error: package name required")
-			fmt.Println("usage: pack open <package>")
+			fmt.Println("error: package name(s) required")
+			fmt.Println("usage: pack open <package1> [package2] [package3] ...")
 			os.Exit(1)
 		}
 		openPackage(args[1:])
@@ -207,24 +207,122 @@ func openPackage(args []string) {
 	}
 	
 	if len(args) == 0 {
-		fmt.Println("error: package name required")
-		fmt.Println("usage: pack open <package> [--verbose]")
+		fmt.Println("error: package name(s) required")
+		fmt.Println("usage: pack open <package1> [package2] [package3] ... [--verbose]")
+		os.Exit(1)
+	}
+	
+	// Parse arguments - separate packages from flags
+	var packageNames []string
+	verbose := false
+	
+	for _, arg := range args {
+		if arg == "--verbose" || arg == "-v" {
+			verbose = true
+		} else {
+			packageNames = append(packageNames, arg)
+		}
+	}
+	
+	if len(packageNames) == 0 {
+		fmt.Println("error: no package names provided")
 		os.Exit(1)
 	}
 	
 	// Check for pack/boxlang updates before installing any package
 	checkAndUpdateCorePackages()
 	
-	packageName := args[0]
-	verbose := false
-	
-	// Check for verbose flag
-	if len(args) > 1 && (args[1] == "--verbose" || args[1] == "-v") {
-		verbose = true
+	// Handle single package (legacy behavior)
+	if len(packageNames) == 1 {
+		if err := executePackageScript(packageNames[0], false, verbose); err != nil {
+			fmt.Printf("error opening package %s: %v\n", packageNames[0], err)
+			os.Exit(1)
+		}
+		return
 	}
 	
-	if err := executePackageScript(packageName, false, verbose); err != nil {
-		fmt.Printf("error opening package %s: %v\n", packageName, err)
+	// Handle multiple packages
+	installMultiplePackages(packageNames, verbose)
+}
+
+// installMultiplePackages handles installing multiple packages with confirmation sequentially
+func installMultiplePackages(packageNames []string, verbose bool) {
+	fmt.Printf("Planning to install %d package(s): %s\n", len(packageNames), strings.Join(packageNames, ", "))
+	
+	// Check which packages are already installed
+	var packagesToInstall []string
+	var alreadyInstalled []string
+	
+	for _, packageName := range packageNames {
+		lockFilePath, err := getLockFilePath(packageName)
+		if err == nil {
+			if _, err := os.Stat(lockFilePath); err == nil {
+				alreadyInstalled = append(alreadyInstalled, packageName)
+			} else {
+				packagesToInstall = append(packagesToInstall, packageName)
+			}
+		} else {
+			packagesToInstall = append(packagesToInstall, packageName)
+		}
+	}
+	
+	// Show status
+	if len(alreadyInstalled) > 0 {
+		fmt.Printf("Already installed: %s\n", strings.Join(alreadyInstalled, ", "))
+	}
+	
+	if len(packagesToInstall) == 0 {
+		fmt.Println("All packages are already installed.")
+		return
+	}
+	
+	fmt.Printf("To install: %s\n", strings.Join(packagesToInstall, ", "))
+	
+	// Ask for confirmation
+	fmt.Printf("\nInstall %d package(s)? [y/N]: ", len(packagesToInstall))
+	reader := bufio.NewReader(os.Stdin)
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		fmt.Printf("error reading input: %v\n", err)
+		os.Exit(1)
+	}
+	
+	response = strings.TrimSpace(strings.ToLower(response))
+	if response != "y" && response != "yes" {
+		fmt.Println("Installation cancelled.")
+		return
+	}
+	
+	// Install packages sequentially
+	fmt.Printf("\nInstalling %d package(s)...\n\n", len(packagesToInstall))
+	
+	var successful []string
+	var failed []string
+	
+	for i, packageName := range packagesToInstall {
+		fmt.Printf("[%d/%d] Installing %s...\n", i+1, len(packagesToInstall), packageName)
+		
+		if err := executePackageScript(packageName, false, verbose); err != nil {
+			fmt.Printf("✗ Failed to install %s: %v\n", packageName, err)
+			failed = append(failed, packageName)
+		} else {
+			fmt.Printf("✓ Successfully installed %s\n", packageName)
+			successful = append(successful, packageName)
+		}
+		
+		if i < len(packagesToInstall)-1 {
+			fmt.Println()
+		}
+	}
+	
+	// Show summary
+	fmt.Printf("\n=== Installation Summary ===\n")
+	if len(successful) > 0 {
+		fmt.Printf("✓ Successfully installed: %s\n", strings.Join(successful, ", "))
+	}
+	
+	if len(failed) > 0 {
+		fmt.Printf("✗ Failed to install: %s\n", strings.Join(failed, ", "))
 		os.Exit(1)
 	}
 }
@@ -3930,18 +4028,21 @@ func showInfo() {
 
 // showOpenHelp displays help for the open command
 func showOpenHelp() {
-	fmt.Println("pack open - install a package")
+	fmt.Println("pack open - install one or more packages")
 	fmt.Println()
 	fmt.Println("USAGE:")
 	fmt.Println("  pack open <package> [--verbose]")
+	fmt.Println("  pack open <package1> <package2> <package3> ... [--verbose]")
 	fmt.Println("  pack open help")
 	fmt.Println()
 	fmt.Println("OPTIONS:")
 	fmt.Println("  --verbose, -v    show all installation output instead of progress bar")
 	fmt.Println()
 	fmt.Println("DESCRIPTION:")
-	fmt.Println("  downloads and installs a package from configured sources.")
-	fmt.Println("  if multiple sources have the package, you'll be prompted to choose.")
+	fmt.Println("  downloads and installs packages from configured sources.")
+	fmt.Println("  when installing multiple packages, shows confirmation prompt first,")
+	fmt.Println("  then installs them one by one.")
+	fmt.Println("  if multiple sources have a package, you'll be prompted to choose.")
 	fmt.Println("  by default shows a progress bar, use --verbose to see all output.")
 	fmt.Println()
 	fmt.Println("  the installation process:")
@@ -3952,8 +4053,10 @@ func showOpenHelp() {
 	fmt.Println("  5. creates a lockfile for tracking")
 	fmt.Println()
 	fmt.Println("EXAMPLES:")
-	fmt.Println("  pack open vim      # Install vim text editor")
-	fmt.Println("  pack open pfetch   # Install pfetch system info tool")
+	fmt.Println("  pack open vim                    # Install vim text editor")
+	fmt.Println("  pack open pfetch --verbose       # Install pfetch with verbose output")
+	fmt.Println("  pack open vim glow pfetch        # Install multiple packages")
+	fmt.Println("  pack open 9dir boxlang python    # Install development tools")
 }
 
 // showCloseHelp displays help for the close command
